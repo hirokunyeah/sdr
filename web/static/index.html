@@ -209,6 +209,7 @@ class Player {
     this.node = this.ctx.createScriptProcessor(2048, 1, 1);
     this.node.onaudioprocess = (e) => this.fill(e.outputBuffer.getChannelData(0));
     this.node.connect(this.gain).connect(this.ctx.destination);
+    if (this.ctx.state === "suspended") this.ctx.resume();   // ブラウザによっては停止状態で作られる
   }
   fill(out) {
     if (!this.ready) {                       // 0.2秒ためてから再生開始

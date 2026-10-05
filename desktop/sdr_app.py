@@ -7,12 +7,14 @@ RTL-SDR Blog V4 用 シンプルSDRレシーバー
 import os
 import sys
 import threading
+import time
 import collections
 import queue
 
 import numpy as np
 from scipy import fft as sfft
 from scipy.signal import firwin, fftconvolve, lfilter
+from scipy.ndimage import median_filter
 
 # Windows: rtlsdr.dll を、このファイルと同じフォルダ または tools/windows/rtl-sdr-blog-x64 から読む
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -60,19 +62,126 @@ PRESETS = [
     ("FM放送 (76〜95MHz)", "WFM", 80.0),
     ("航空無線 (118〜137MHz)", "AM", 124.0),
     ("アマチュア無線 144MHz帯", "NFM", 145.0),
+    ("盗聴器チェック A 398.605MHz", "NFM", 398.605),
+    ("盗聴器チェック B 399.030MHz", "NFM", 399.030),
+    ("盗聴器チェック C 399.455MHz", "NFM", 399.455),
     ("ADS-B 1090MHz（表示のみ）", "AM", 1090.0),
 ]
 
 
 # 局サーチの対象バンド: (表示名, モード, 開始Hz, 終了Hz, チャンネル間隔Hz, 測定帯域幅Hz, 検出しきい値dB)
 SCAN_BANDS = [
-    ("FM放送 76〜95MHz", "WFM", 76.0e6, 95.0e6, 100e3, 150e3, 10.0),
+    ("市民ラジオ(CB) 26.968〜27.144MHz", "AM", 26.968e6, 27.144e6, 8e3, 6e3, 8.0),
+    ("FM放送 76〜95MHz", "WFM", 76.0e6, 95.0e6, 100e3, 150e3, 6.0),
     ("航空無線 118〜137MHz", "AM", 118.0e6, 137.0e6, 25e3, 8e3, 8.0),
     ("アマチュア 144〜146MHz", "NFM", 144.0e6, 146.0e6, 20e3, 12e3, 8.0),
+    ("国際VHF(船舶) 156〜162MHz", "NFM", 156.025e6, 162.025e6, 25e3, 12e3, 8.0),
+    ("盗聴器 398.4〜399.7MHz", "NFM", 398.4e6, 399.7e6, 5e3, 12e3, 8.0),
+    ("特定小電力 421.575〜422.3MHz", "NFM", 421.575e6, 422.3e6, 12.5e3, 8e3, 8.0),
     ("アマチュア 430〜440MHz", "NFM", 430.0e6, 440.0e6, 20e3, 12e3, 8.0),
 ]
 SCAN_STEP = 0.8e6         # サーチ時にハードの中心周波数を動かす間隔
 SCAN_USE = (0.1e6, 0.9e6)  # 中心からこの範囲のオフセットだけを測定に使う（DCと帯域端を避ける）
+SCAN_FLOOR_SPAN = 1.5e6   # 雑音レベルは各チャンネルの前後この範囲の中央値で推定する
+SCAN_LOG = os.path.join(HERE, "scan_last.csv")   # 直近のサーチの測定値（うまく見つからないときの確認用）
+SCAN_SETTLE_SEC = 0.3     # 中心周波数を変えてから、この時間が経つまでのデータは捨てる
+SCAN_SKIP_BLOCKS = 3      # 同じく、少なくともこのブロック数は捨てる
+SCAN_AVG_BLOCKS = 2       # 1ステップで平均するブロック数
+SCAN_SEC_PER_STEP = 0.55  # 1ステップあたりのおおよその所要時間（所要時間の目安表示用）
+SCAN_WARN_HZ = 50e6       # これより広い範囲は確認してからサーチする
+# カスタム範囲のモード別既定値: (ch間隔Hz, 測定帯域幅Hz, 検出しきい値dB)
+SCAN_MODE_DEFAULTS = {"WFM": (100e3, 150e3, 6.0), "NFM": (12.5e3, 12e3, 8.0), "AM": (25e3, 8e3, 8.0)}
+SCAN_CH_STEPS = [8e3, 9e3, 10e3, 12.5e3, 20e3, 25e3, 50e3, 100e3, 200e3]
+
+
+def scan_steps(band):
+    """サーチで中心周波数を動かす回数"""
+    return int(np.ceil((band[3] - band[2] + 1.5 * SCAN_STEP) / SCAN_STEP))
+
+
+def scan_eta(band):
+    """「Nステップ・約M秒/分」の目安"""
+    n = scan_steps(band)
+    sec = n * SCAN_SEC_PER_STEP
+    return f"{n}ステップ・約{max(1, round(sec))}秒" if sec < 90 else f"{n}ステップ・約{round(sec / 60)}分"
+
+
+def custom_band(mode, f_start, f_stop, step):
+    """カスタム範囲のバンド定義を作る。測定帯域幅としきい値はモード別の既定値を使う"""
+    _, bw, thresh = SCAN_MODE_DEFAULTS[mode]
+    if mode != "WFM":
+        bw = min(bw, 0.8 * step)    # 隣のチャンネルを拾わないよう、ch間隔より狭くする
+    name = f"カスタム {f_start / 1e6:g}〜{f_stop / 1e6:g}MHz {mode}"
+    return (name, mode, f_start, f_stop, step, bw, thresh)
+
+
+class CustomScanDialog(QtWidgets.QDialog):
+    """局サーチのカスタム範囲（開始・終了周波数、モード、ch間隔）を入力する"""
+
+    def __init__(self, parent, band=None):
+        super().__init__(parent)
+        self.setWindowTitle("カスタム範囲")
+        self.start = QtWidgets.QDoubleSpinBox()
+        self.stop = QtWidgets.QDoubleSpinBox()
+        for s in (self.start, self.stop):
+            s.setRange(1.0, 1766.0)
+            s.setDecimals(3)
+            s.setSuffix(" MHz")
+            s.setKeyboardTracking(False)
+        self.mode = theme.Segmented(["WFM", "NFM", "AM"])
+        self.step = QtWidgets.QComboBox()
+        for st in SCAN_CH_STEPS:
+            self.step.addItem(f"{st / 1e3:g} kHz", st)
+        self.info = theme.caption("", "hint")
+
+        if band:
+            _, mode, f_start, f_stop, step = band[:5]
+        else:
+            mode, f_start, f_stop, step = "NFM", 430e6, 440e6, SCAN_MODE_DEFAULTS["NFM"][0]
+        self.mode.setCurrentText(mode)
+        self.start.setValue(f_start / 1e6)
+        self.stop.setValue(f_stop / 1e6)
+        self.step.setCurrentIndex(SCAN_CH_STEPS.index(step))
+
+        form = QtWidgets.QFormLayout()
+        form.addRow("開始", self.start)
+        form.addRow("終了", self.stop)
+        form.addRow("モード", self.mode)
+        form.addRow("ch間隔", self.step)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.ok = buttons.button(QtWidgets.QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(self.info)
+        lay.addWidget(buttons)
+
+        self.mode.currentIndexChanged.connect(self.on_mode)
+        for s in (self.start, self.stop):
+            s.valueChanged.connect(self.update_info)
+        self.step.currentIndexChanged.connect(self.update_info)
+        self.update_info()
+
+    def on_mode(self):
+        self.step.setCurrentIndex(SCAN_CH_STEPS.index(SCAN_MODE_DEFAULTS[self.mode.currentText()][0]))
+        self.update_info()
+
+    def band(self):
+        return custom_band(self.mode.currentText(), self.start.value() * 1e6,
+                           self.stop.value() * 1e6, self.step.currentData())
+
+    def update_info(self):
+        b = self.band()
+        if b[3] - b[2] < b[4]:
+            self.info.setText("終了周波数は開始周波数より ch間隔以上 大きくしてください")
+            self.ok.setEnabled(False)
+            return
+        self.ok.setEnabled(True)
+        text = scan_eta(b)
+        if b[3] - b[2] > SCAN_WARN_HZ:
+            text += f"\n⚠ {SCAN_WARN_HZ / 1e6:g}MHzを超える範囲は時間がかかります"
+        self.info.setText(text)
 
 
 # ---------------- 信号処理 ----------------
@@ -181,17 +290,58 @@ class AudioOut:
         self.volume = 0.5
         self.ready = False   # 一定量たまるまで再生を待つ（プリバッファ）
         self.underruns = 0   # 音声が足りなくなった回数
+        self.device = None   # 出力デバイス番号（None = OSの既定）
+        self.running = False
         self.stream = None
-        if sd is not None:
-            self.stream = sd.OutputStream(samplerate=AUDIO_FS, channels=1,
+        self.error = None
+        self._open()
+
+    def _open(self):
+        self.stream, self.error = None, None
+        if sd is None:
+            return
+        try:
+            self.stream = sd.OutputStream(device=self.device, samplerate=AUDIO_FS, channels=1,
                                           dtype="float32", blocksize=2048,
                                           latency="high", callback=self._cb)
+        except Exception as e:
+            self.error = str(e)
+
+    @staticmethod
+    def outputs():
+        """選べる出力デバイス [(番号, 名前)]。OS既定のホストAPI（WindowsはMME）のものだけ"""
+        if sd is None:
+            return []
+        try:
+            api = sd.default.hostapi
+            return [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+                    if d["max_output_channels"] > 0 and d["hostapi"] == api]
+        except Exception:
+            return []
+
+    def set_device(self, device):
+        """出力先を切り替える。開けなければ既定に戻してエラー文を返す"""
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+        self.device = device
+        self._open()
+        err = self.error
+        if err and device is not None:
+            self.device = None
+            self._open()
+        if self.running and self.stream:
+            self.clear()
+            self.stream.start()
+        return err
 
     def start(self):
+        self.running = True
         if self.stream:
             self.stream.start()
 
     def stop(self):
+        self.running = False
         if self.stream:
             self.stream.stop()
         self.clear()
@@ -389,15 +539,22 @@ class SdrWorker(QtCore.QThread):
             if not self._running or self._scan_cancel:
                 return []
             sdr.center_freq = c
-            self._drain(blocks)
+            # USB側には切り替え前のデータが溜まっているので、時間とブロック数の両方で十分に捨ててから測る
+            t0 = time.monotonic()
             try:
-                blocks.get(timeout=1.0)              # 切り替え直後のブロックは捨てる
-                raw = blocks.get(timeout=1.0)
+                skipped = 0
+                while skipped < SCAN_SKIP_BLOCKS or time.monotonic() - t0 < SCAN_SETTLE_SEC:
+                    blocks.get(timeout=1.0)
+                    skipped += 1
+                raws = [blocks.get(timeout=1.0) for _ in range(SCAN_AVG_BLOCKS)]
             except queue.Empty:
                 continue
-            iq = ((raw.astype(np.float32) - 127.5) / 127.5).view(np.complex64)
-            spec = sfft.fft(iq[:n_fr * FFT_N].reshape(n_fr, FFT_N) * win, axis=1)
-            p = sfft.fftshift(np.mean(spec.real ** 2 + spec.imag ** 2, axis=0) / win_pow)
+            p = 0
+            for raw in raws:
+                iq = ((raw.astype(np.float32) - 127.5) / 127.5).view(np.complex64)
+                spec = sfft.fft(iq[:n_fr * FFT_N].reshape(n_fr, FFT_N) * win, axis=1)
+                p = p + np.mean(spec.real ** 2 + spec.imag ** 2, axis=0) / win_pow
+            p = sfft.fftshift(p / len(raws))
             freqs = c + offsets
 
             d = np.abs(chans - c)
@@ -410,7 +567,14 @@ class SdrWorker(QtCore.QThread):
         ok = np.isfinite(level)
         if not ok.any():
             return []
-        snr = level - np.median(level[ok])          # 空きチャンネルの多さを利用して雑音レベルを推定
+        # 雑音レベルは近くのチャンネルの中央値で推定する（空きチャンネルの方が多いことを利用）。
+        # 範囲全体の中央値にしないのは、V4のFMノッチ（85MHz未満でオン）や測定位置で
+        # 雑音レベルが場所ごとに変わり、弱い側の局がしきい値を超えなくなるため
+        filled = np.where(ok, level, np.median(level[ok]))
+        size = 2 * max(1, int(SCAN_FLOOR_SPAN / step)) + 1
+        floor = median_filter(filled, size=size, mode="nearest")
+        snr = level - floor
+        self._save_scan_log(chans, level, floor, snr)
         guard = 0.15e6 if mode == "WFM" else max(1.5 * step, bw)
         found = []
         for i in np.argsort(-snr):                   # 強い順に、近くの重複を除いて採用
@@ -419,6 +583,16 @@ class SdrWorker(QtCore.QThread):
             if all(abs(chans[i] - f) > guard for f, _ in found):
                 found.append((float(chans[i]), float(snr[i])))
         return sorted(found)
+
+    @staticmethod
+    def _save_scan_log(chans, level, floor, snr):
+        try:
+            with open(SCAN_LOG, "w", encoding="utf-8") as f:
+                f.write("freq_mhz,level_db,floor_db,snr_db\n")
+                for row in zip(chans / 1e6, level, floor, snr):
+                    f.write("%.4f,%.1f,%.1f,%.1f\n" % row)
+        except OSError:
+            pass
 
 
 # ---------------- 画面 ----------------
@@ -513,7 +687,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- 局サーチ ---
         self.scan_band = QtWidgets.QComboBox()
         for b in SCAN_BANDS:
-            self.scan_band.addItem(b[0])
+            self.scan_band.addItem(b[0], b)
+        self.scan_band.addItem("カスタム…", None)
+        self.scan_band.setToolTip("「カスタム…」で開始・終了周波数とモードを指定できます")
+        self.scan_band_idx = self.scan_band.currentIndex()   # カスタム入力をやめたときに戻す先
         self.scan_btn = QtWidgets.QPushButton("📡 局サーチ")
         self.prev_btn = QtWidgets.QPushButton("◀ 前の局")
         self.next_btn = QtWidgets.QPushButton("次の局 ▶")
@@ -526,6 +703,17 @@ class MainWindow(QtWidgets.QMainWindow):
         bar2.addWidget(self.prev_btn)
         bar2.addWidget(self.next_btn)
         bar2.addStretch()
+        self.out_dev = QtWidgets.QComboBox()
+        self.out_dev.addItem("OSの既定", None)
+        for i, name in AudioOut.outputs():
+            self.out_dev.addItem(name, i)
+        self.out_dev.setToolTip("音が聞こえないときは、スピーカー／ヘッドホンを選び直してください")
+        self.out_dev.setMinimumWidth(200)
+        self.out_dev.setMaximumWidth(300)
+        self.out_dev.setEnabled(sd is not None)
+        bar2.addWidget(theme.caption("音声出力"))
+        bar2.addWidget(self.out_dev)
+        bar2.addSpacing(16)
         self.sat_btn = QtWidgets.QPushButton("🛰 気象衛星")
         bar2.addWidget(self.sat_btn)
         self.sat_window = None
@@ -624,11 +812,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode.currentIndexChanged.connect(self.apply_params)
         self.gain.currentIndexChanged.connect(self.apply_params)
         self.vol.valueChanged.connect(self.on_volume)
+        self.out_dev.currentIndexChanged.connect(self.on_output_device)
         self.down_btn.clicked.connect(lambda: self.step_freq(-1))
         self.up_btn.clicked.connect(lambda: self.step_freq(+1))
         self.preset.currentIndexChanged.connect(self.apply_preset)
         self.run_btn.toggled.connect(self.toggle_run)
         self.scan_btn.clicked.connect(self.toggle_scan)
+        self.scan_band.activated.connect(self.on_scan_band)
         self.sat_btn.clicked.connect(self.open_satellite)
         self.prev_btn.clicked.connect(lambda: self.seek(-1))
         self.next_btn.clicked.connect(lambda: self.seek(+1))
@@ -659,6 +849,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_volume(self, v):
         self.audio.volume = v / 100
         self.vol_label.setText(f"{v}%")
+
+    def on_output_device(self, idx):
+        err = self.audio.set_device(self.out_dev.itemData(idx))
+        if err:
+            self.out_dev.blockSignals(True)
+            self.out_dev.setCurrentIndex(0)
+            self.out_dev.blockSignals(False)
+            QtWidgets.QMessageBox.warning(self, "音声出力", f"このデバイスは使えません。既定に戻しました。\n\n{err}")
+        else:
+            self.statusBar().showMessage(f"音声出力：{self.out_dev.currentText()}", 4000)
 
     def freq_step(self):
         return 0.1 if self.mode.currentText() == "WFM" else 0.005
@@ -717,6 +917,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """衛星ウィンドウから呼ばれる。受信を開始し、指定周波数で録音を始める"""
         if self.scanning:
             return "局サーチ中は録音できません"
+        # 録音が終わったら元に戻せるよう、直前の状態を覚えておく
+        self.before_rec = (self.freq.value(), self.mode.currentText(), self.worker is not None)
         if not self.worker:
             self.run_btn.setChecked(True)
             if not self.worker:
@@ -743,6 +945,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for w in self.tuning_widgets():
             w.setEnabled(True)
         self.set_state("running" if self.worker else "stopped")
+        # 録音前の状態に戻す（衛星の周波数のまま残らないように）
+        before, self.before_rec = getattr(self, "before_rec", None), None
+        if before:
+            freq, mode, was_running = before
+            self.mode.setCurrentText(mode)
+            self.freq.setValue(freq)
+            if not was_running and self.worker:
+                self.run_btn.setChecked(False)      # 録音のために開始した受信は止める
+            self.statusBar().showMessage(f"録音前の {freq:.3f} MHz {mode} に戻しました", 5000)
         return rec.bytes if rec else 0
 
     # --- 局サーチ ---
@@ -751,11 +962,21 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.worker:
                 self.worker.cancel_scan()
             return
+        band = self.scan_band.currentData()
+        if band is None:
+            band = self.edit_custom_band()
+            if band is None:
+                return
+        if band[3] - band[2] > SCAN_WARN_HZ:
+            ans = QtWidgets.QMessageBox.question(
+                self, "局サーチ",
+                f"範囲が {(band[3] - band[2]) / 1e6:g}MHz と広いため、{scan_eta(band)}かかります。\nサーチしますか？")
+            if ans != QtWidgets.QMessageBox.Yes:
+                return
         if not self.worker:
             self.run_btn.setChecked(True)     # 受信していなければ開始する
             if not self.worker:
                 return
-        band = SCAN_BANDS[self.scan_band.currentIndex()]
         self.scanning = True
         self.scan_btn.setText("■ サーチ中止")
         self.progress.setValue(0)
@@ -763,6 +984,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"{band[0]} をサーチしています…")
         self.set_state("scanning")
         self.worker.request_scan(band)
+
+    def on_scan_band(self, idx):
+        """「カスタム…」を選んだら（選び直したときも）範囲を入力してもらう"""
+        if idx == self.scan_band.count() - 1:
+            if self.edit_custom_band() is None:
+                self.scan_band.setCurrentIndex(self.scan_band_idx)
+                return
+        self.scan_band_idx = self.scan_band.currentIndex()
+
+    def edit_custom_band(self):
+        """カスタム範囲を入力して最後の項目に保存する。キャンセルなら None"""
+        last = self.scan_band.count() - 1
+        dlg = CustomScanDialog(self, self.scan_band.itemData(last))
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return None
+        band = dlg.band()
+        self.scan_band.setItemText(last, band[0])
+        self.scan_band.setItemData(last, band)
+        self.scan_band.setCurrentIndex(last)
+        return band
 
     def on_scan_progress(self, pct):
         self.progress.setValue(pct)
@@ -810,8 +1051,8 @@ class MainWindow(QtWidgets.QMainWindow):
         msg = f"{self.freq.value():.3f} MHz   {self.mode.currentText()}   ゲイン {self.gain.currentText()}"
         if self.worker:
             msg += f"   ｜ 音切れ {self.audio.underruns}回 ・ 処理落ち {self.worker.dropped}回"
-        if SD_ERR:
-            msg += f"  ⚠ 音声出力が使えません（{SD_ERR}）"
+        if SD_ERR or self.audio.error:
+            msg += f"  ⚠ 音声出力が使えません（{SD_ERR or self.audio.error}）"
         self.statusBar().showMessage(msg)
 
     # --- 開始 / 停止 ---
@@ -854,6 +1095,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.audio.stop()
 
     def on_failed(self, msg):
+        # 録音中に受信が止まった場合は、録音を終わらせて操作できる状態に戻す（録れた分はデコードする）
+        if self.sat_window and self.sat_window.recording:
+            self.sat_window.stop_record()
+        elif self.worker and self.worker.recorder:
+            self.stop_recording()
         QtWidgets.QMessageBox.critical(self, "エラー", msg)
         self.run_btn.setChecked(False)
 

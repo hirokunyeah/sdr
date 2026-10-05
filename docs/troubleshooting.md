@@ -5,6 +5,8 @@
 |---|---|
 | 「ドライバが見つかりません」 | Windows：`setup_windows.bat` を実行し、`tools\windows\rtl-sdr-blog-x64\rtlsdr.dll` ができたか確認。Linux / Mac：ドライバのビルド・`sudo ldconfig` を確認 |
 | `rtlsdr_set_dithering` が見つからない | `pip install pyrtlsdr==0.2.93` を入れ直す |
+| 音が出ない（デスクトップ版） | 「音声出力」で実際に使っているスピーカー／ヘッドホンを選ぶ（OSの既定がモニターのHDMI音声などになっていることがある）。Windows の「音量ミキサー」で python がミュートになっていないかも確認 |
+| 音が出ない（Web版） | 「🔊 音声オン」を押したか確認。iPhone はマナーモード（消音スイッチ）だと鳴らない |
 | 音が途切れる | 他の重いアプリを閉じる。USBハブではなくPC本体に直接挿す |
 | 雑音ばかり・信号が潰れる | ゲインを 25〜40dB 付近に固定して調整する |
 
