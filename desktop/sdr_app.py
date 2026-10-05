@@ -44,7 +44,7 @@ except Exception as e:
     sd = None
     SD_ERR = e
 
-VERSION = "1.4（気象衛星対応）"
+VERSION = "1.5（ADS-B対応）"
 
 # ---------------- 定数 ----------------
 FS = 2_400_000          # サンプルレート (2.4 MS/s)
@@ -65,7 +65,6 @@ PRESETS = [
     ("盗聴器チェック A 398.605MHz", "NFM", 398.605),
     ("盗聴器チェック B 399.030MHz", "NFM", 399.030),
     ("盗聴器チェック C 399.455MHz", "NFM", 399.455),
-    ("ADS-B 1090MHz（表示のみ）", "AM", 1090.0),
 ]
 
 
@@ -717,6 +716,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sat_btn = QtWidgets.QPushButton("🛰 気象衛星")
         bar2.addWidget(self.sat_btn)
         self.sat_window = None
+        self.adsb_btn = QtWidgets.QPushButton("✈ ADS-B")
+        self.adsb_btn.setToolTip("航空機の位置を地図に表示します（受信中は SDR を ADS-B 専用で使います）")
+        bar2.addWidget(self.adsb_btn)
+        self.adsb_window = None
 
         self.station_list = QtWidgets.QListWidget()
         self.station_list.setFont(theme.font(theme.MONO_FONTS, 10))
@@ -820,6 +823,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_btn.clicked.connect(self.toggle_scan)
         self.scan_band.activated.connect(self.on_scan_band)
         self.sat_btn.clicked.connect(self.open_satellite)
+        self.adsb_btn.clicked.connect(self.open_adsb)
         self.prev_btn.clicked.connect(lambda: self.seek(-1))
         self.next_btn.clicked.connect(lambda: self.seek(+1))
         self.station_list.itemClicked.connect(
@@ -917,8 +921,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """衛星ウィンドウから呼ばれる。受信を開始し、指定周波数で録音を始める"""
         if self.scanning:
             return "局サーチ中は録音できません"
+        # ADS-B 受信中なら止めて SDR を空ける（録音が終わったら再開する）
+        adsb_was_running = self.adsb_running()
+        if adsb_was_running:
+            self.adsb_window.stop("気象衛星の録音のため一時停止中（録音が終わると再開します）")
         # 録音が終わったら元に戻せるよう、直前の状態を覚えておく
-        self.before_rec = (self.freq.value(), self.mode.currentText(), self.worker is not None)
+        self.before_rec = (self.freq.value(), self.mode.currentText(), self.worker is not None, adsb_was_running)
         if not self.worker:
             self.run_btn.setChecked(True)
             if not self.worker:
@@ -930,6 +938,17 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setEnabled(False)
         self.set_state("recording")
         return None
+
+    # --- ADS-B ---
+    def open_adsb(self):
+        if self.adsb_window is None:
+            import adsb
+            self.adsb_window = adsb.AdsbWindow(self, GAINS)
+        self.adsb_window.show()
+        self.adsb_window.raise_()
+
+    def adsb_running(self):
+        return bool(self.adsb_window and self.adsb_window.running)
 
     def tuning_widgets(self):
         """録音中は触れないようにする操作部品"""
@@ -948,11 +967,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # 録音前の状態に戻す（衛星の周波数のまま残らないように）
         before, self.before_rec = getattr(self, "before_rec", None), None
         if before:
-            freq, mode, was_running = before
+            freq, mode, was_running, adsb_was_running = before
             self.mode.setCurrentText(mode)
             self.freq.setValue(freq)
             if not was_running and self.worker:
                 self.run_btn.setChecked(False)      # 録音のために開始した受信は止める
+            if adsb_was_running and self.adsb_window:
+                self.adsb_window.start()
             self.statusBar().showMessage(f"録音前の {freq:.3f} MHz {mode} に戻しました", 5000)
         return rec.bytes if rec else 0
 
@@ -1057,6 +1078,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # --- 開始 / 停止 ---
     def toggle_run(self, on):
+        if on and self.adsb_running():
+            QtWidgets.QMessageBox.information(
+                self, "ADS-B 受信中", "ADS-B の受信で SDR を使っています。\nADS-B ウィンドウで停止してから受信を開始してください。")
+            self.run_btn.setChecked(False)
+            return
         if on:
             if RtlSdr is None:
                 QtWidgets.QMessageBox.critical(
@@ -1125,6 +1151,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.img.setImage(self.wf, autoLevels=False, levels=(floor - 3, floor + 40))
 
     def closeEvent(self, ev):
+        if self.adsb_window:
+            self.adsb_window.shutdown()
+            self.adsb_window.close()
         if self.sat_window:
             self.sat_window.shutdown()
         self.stop_recording()
@@ -1133,6 +1162,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main():
+    # ADS-B の地図（QtWebEngine）は QApplication より前にこの設定が必要
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_ShareOpenGLContexts)
     app = QtWidgets.QApplication(sys.argv)
     theme.apply(app)
     win = MainWindow()

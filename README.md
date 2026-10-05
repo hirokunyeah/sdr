@@ -1,11 +1,11 @@
 # RTL-SDR V4 レシーバー
 
 RTL-SDR Blog V4 で、FM放送・航空無線・アマチュア無線の受信と、
-気象衛星 Meteor-M の画像受信ができるアプリです。2つの版があります。
+気象衛星 Meteor-M の画像受信、ADS-B による航空機の位置表示ができるアプリです。2つの版があります。
 
 | 版 | 動かす場所 | 主な機能 | 入口 |
 |---|---|---|---|
-| **デスクトップ版** | Windows（推奨）/ Ubuntu / WSL / Mac | スペクトラム・ウォーターフォール、WFM/NFM/AM 復調、局サーチ、気象衛星受信 | `desktop/sdr_app.py` |
+| **デスクトップ版** | Windows（推奨）/ Ubuntu / WSL / Mac | スペクトラム・ウォーターフォール、WFM/NFM/AM 復調、局サーチ、気象衛星受信、ADS-B（航空機の地図表示） | `desktop/sdr_app.py` |
 | **Web版（サーバー）** | Raspberry Pi（Ubuntu）など | Pi で受信し、スマホやPCのブラウザで表示・音声再生 | `web/server.py` |
 
 ## フォルダ構成
@@ -18,11 +18,13 @@ sdr/
 │   ├── install-windows.md         Windows へのインストール
 │   ├── install-linux.md           Ubuntu / WSL / Mac へのインストール
 │   ├── install-raspberrypi.md     Raspberry Pi に Web版サーバーを入れる
-│   ├── usage.md                   使い方（デスクトップ版・Web版・気象衛星）
+│   ├── usage.md                   使い方（デスクトップ版・Web版・気象衛星・ADS-B）
 │   └── troubleshooting.md         うまく動かないとき
 ├── desktop/                   … デスクトップ版アプリ
 │   ├── sdr_app.py                 本体
 │   ├── satellite.py               気象衛星ウィンドウ
+│   ├── adsb.py                    ADS-B ウィンドウ（地図・機体一覧）
+│   ├── adsb_decoder.py            ADS-B の復調・解読
 │   ├── theme.py, icons/           画面のデザイン（ダークテーマ。Web版と同じ配色）
 │   ├── requirements.txt
 │   └── satellite_data/ など       実行時に作られるデータ・設定（※）
