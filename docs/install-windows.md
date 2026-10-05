@@ -1,4 +1,4 @@
-# Windows へのインストール（デスクトップ版）
+# Windows へのインストール
 
 必要なドライバ・ツールは `tools\windows\archives\` に入っています。
 以下、コマンドはこのフォルダ（`sdr`）で PowerShell またはコマンドプロンプトを開いて実行します。

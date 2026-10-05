@@ -9,7 +9,6 @@ import glob
 import json
 import os
 import shutil
-import sys
 import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -44,9 +43,7 @@ def find_satdump():
         return exe
     for p in (os.path.normpath(os.path.join(HERE, "..", "tools", "windows", "SatDump", "satdump.exe")),
               r"C:\Program Files\SatDump\satdump.exe",
-              r"C:\Program Files (x86)\SatDump\satdump.exe",
-              "/usr/bin/satdump", "/usr/local/bin/satdump",
-              "/Applications/SatDump.app/Contents/MacOS/satdump"):
+              r"C:\Program Files (x86)\SatDump\satdump.exe"):
         if os.path.exists(p):
             return p
     return ""
@@ -313,8 +310,7 @@ class SatelliteWindow(QtWidgets.QWidget):
         self.recalc()
 
     def browse_satdump(self):
-        filt = "satdump (satdump.exe)" if sys.platform == "win32" else "satdump (*)"
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "SatDump の実行ファイル", "", filt)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "SatDump の実行ファイル", "", "satdump (satdump.exe)")
         if path:
             self.satdump.setText(path)
             self.save_settings()

@@ -1,14 +1,13 @@
 # 使い方
 
-## デスクトップ版（`desktop/sdr_app.py`）
+## 基本の使い方（`desktop/sdr_app.py`）
 
 ### 起動
-| 環境 | コマンド |
-|---|---|
-| Windows | `.venv\Scripts\python desktop\sdr_app.py` |
-| Ubuntu / WSL / Mac | `venv/bin/python desktop/sdr_app.py` |
+```
+.venv\Scripts\python desktop\sdr_app.py
+```
 
-Windows では、初回（または clone 直後）に `setup_windows.bat` でツールを展開しておく必要があります
+初回（または clone 直後）に `setup_windows.bat` でツールを展開しておく必要があります
 （[install-windows.md](install-windows.md#2-ツールを展開するsetup_windowsbat)）。
 
 ### 画面の見方
@@ -42,7 +41,7 @@ Windows では、初回（または clone 直後）に `setup_windows.bat` で�
 「カスタム…」を選ぶと、開始・終了周波数、モード、ch間隔を指定できます（測定帯域幅と検出しきい値はモードに合わせて自動設定）。
 所要時間は範囲の幅に比例し、0.8MHzごとに約0.5秒かかります。50MHzを超える範囲は、サーチ前に確認が出ます。
 
-## 航空機の位置を地図に表示する（ADS-B、デスクトップ版のみ）
+## 航空機の位置を地図に表示する（ADS-B）
 「✈ ADS-B」ボタンで専用ウィンドウが開きます。旅客機などが 1090MHz で送信している ADS-B を受信し、
 機体の位置・便名・高度・速度・方位を地図と一覧に表示します。
 
@@ -83,22 +82,13 @@ Windows では、初回（または clone 直後）に `setup_windows.bat` で�
 1090MHz の波長は約27.5cm です。付属のダイポールなら左右の棒をそれぞれ**約6.5cm**に縮め、
 **縦向き**（垂直）に立てます。窓際や屋外など、空が広く見える高い場所ほど遠くの機体まで受信できます。
 
-## Web版（`web/server.py`）
-ブラウザで `http://<サーバーのIP>:8080/` を開きます。
-- 周波数（−／＋ボタンまたは直接入力して Enter）、モード（WFM/NFM/AM のボタン）、ゲイン、プリセットを操作
-- グラフのクリックで選局、ホイールで微調整。右上に接続状態（受信中／待機中／再接続中）が表示されます
-- スマホでは縦に並ぶレイアウトになります
-- 音声は「🔊 音声オン」を押すと再生されます（ブラウザの仕様でボタン操作が必要です）
-- 複数のブラウザから同時に開けます（設定は全員で共有されます）
-
-## 気象衛星の画像を受信する（Meteor-M LRPT、デスクトップ版のみ）
+## 気象衛星の画像を受信する（Meteor-M LRPT）
 「🛰 気象衛星」ボタンで専用ウィンドウが開きます。NOAA 衛星は2025年に運用を終えたため、
 現在受信できる Meteor-M2-3 / M2-4（137.9MHz）を対象にしています。
 
 ### 準備
 1. **SatDump を用意**（画像への変換に使う無料ソフト）
-   - Windows：`setup_windows.bat` で展開済み（[install-windows.md の手順7](install-windows.md#7-気象衛星を受信する場合satdump)）
-   - Linux / Mac：[install-linux.md](install-linux.md#気象衛星を受信する場合satdump)
+   - `setup_windows.bat` で展開済み（[install-windows.md の手順7](install-windows.md#7-気象衛星を受信する場合satdump)）
 2. **アンテナを 137MHz 用の V字ダイポールにする**（付属のアンテナでOK）
    - 左右の棒をそれぞれ約53cmに伸ばし、120°に開いた V字にする
    - 地面と水平に置き、V字の開いた側を北か南に向ける
