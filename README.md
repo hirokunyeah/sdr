@@ -23,6 +23,7 @@ sdr/
 ├── desktop/                   … デスクトップ版アプリ
 │   ├── sdr_app.py                 本体
 │   ├── satellite.py               気象衛星ウィンドウ
+│   ├── theme.py, icons/           画面のデザイン（ダークテーマ。Web版と同じ配色）
 │   ├── requirements.txt
 │   └── satellite_data/ など       実行時に作られるデータ・設定（※）
 ├── web/                       … Web版（Raspberry Pi 用サーバー）

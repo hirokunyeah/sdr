@@ -6,65 +6,145 @@
 <title>RTL-SDR Webレシーバー</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e6e8ee; --muted: #8a93a6;
-    --accent: #4fc3f7; --marker: #ff5252;
+    --bg: #0f1115; --panel: #181b22; --field: #0f1218; --raised: #222734; --line: #2a2f3a;
+    --text: #e6e8ee; --muted: #8a93a6; --dim: #555c6b;
+    --accent: #4fc3f7; --accent-dim: #1e3a4a; --primary: #1e6f9f;
+    --marker: #ff5252; --rec: #e5534b; --rec-dim: #7a2b2b; --ok: #5fd38d; --plot: #0b0d11;
+    --mono: "BIZ UDGothic", "BIZ UDゴシック", ui-monospace, "SF Mono", Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
     font-family: "BIZ UDPGothic", "BIZ UDPゴシック", "Hiragino Sans", "Yu Gothic UI", sans-serif;
-    display: flex; flex-direction: column;
+    font-size: 14px; display: flex; flex-direction: column;
+    -webkit-tap-highlight-color: transparent;
   }
+
+  /* ---------- チューナーパネル ---------- */
   header {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
-    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+    margin: 10px 10px 0; padding: 10px 16px 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 24px;
   }
-  .group { display: flex; align-items: center; gap: 6px; }
-  label { color: var(--muted); font-size: 13px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field > .cap { color: var(--muted); font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 6px; }
+  .spacer { flex: 1; }
+
   input, select, button {
-    font: inherit; color: var(--text); background: #0f1218; border: 1px solid var(--line);
-    border-radius: 6px; padding: 6px 8px;
+    font: inherit; color: var(--text); background: var(--field);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; height: 36px;
   }
-  #freq { width: 120px; font-family: "BIZ UDGothic", "BIZ UDゴシック", ui-monospace, monospace;
-          font-size: 18px; text-align: right; }
-  button { cursor: pointer; }
+  select { padding-right: 6px; }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button { cursor: pointer; background: var(--raised); transition: border-color .12s, background .12s; }
   button:hover { border-color: var(--accent); }
-  .step { width: 34px; padding: 6px 0; }
-  #audioBtn { background: #1e6f9f; border-color: #1e6f9f; min-width: 120px; }
-  #audioBtn.on { background: #7a2b2b; border-color: #7a2b2b; }
-  input[type=range] { padding: 0; width: 110px; }
-  main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  canvas { display: block; width: 100%; cursor: crosshair; }
-  #spec { height: 240px; border-bottom: 1px solid var(--line); }
+  button:active { background: var(--field); }
+
+  #freq {
+    width: 7.2ch; height: 44px; padding: 0; border: none; background: transparent; text-align: right;
+    font-family: var(--mono); font-size: 32px; font-weight: bold; color: var(--accent);
+  }
+  #freq:focus { background: var(--field); border-radius: 6px; }
+  .unit { color: var(--muted); font-weight: bold; }
+  .step { width: 32px; padding: 0; font-size: 18px; }
+
+  .seg { display: flex; }
+  .seg button { border-radius: 0; margin-left: -1px; padding: 0 14px; }
+  .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .seg button.on { background: var(--accent); border-color: var(--accent); color: #071018; font-weight: bold; position: relative; }
+
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 120px; height: 36px;
+    padding: 0; border: none; background: transparent;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(var(--accent), var(--accent)) 0 / var(--pct, 60%) 100% no-repeat, var(--line);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px;
+    border-radius: 50%; background: var(--text); border: none;
+  }
+  input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--line); }
+  input[type=range]::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+  input[type=range]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--text); border: none; }
+  #volPct { color: var(--muted); font-size: 12px; min-width: 3.2em; }
+
+  .side { align-items: stretch; }
+  #pill { font-size: 12px; font-weight: bold; color: var(--dim); text-align: center; white-space: nowrap; }
+  #pill.ok { color: var(--ok); } #pill.err { color: #ff8a80; } #pill.wait { color: #f0b429; }
+  #audioBtn {
+    min-width: 140px; height: 40px; font-weight: bold;
+    background: var(--primary); border-color: var(--primary);
+  }
+  #audioBtn.on { background: var(--rec-dim); border-color: var(--rec); }
+
+  /* ---------- グラフ ---------- */
+  main {
+    flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 0;
+    margin: 10px; 
+  }
+  canvas {
+    display: block; width: 100%; cursor: crosshair; background: var(--plot);
+    border: 1px solid var(--line); border-radius: 8px; touch-action: manipulation;
+  }
+  #spec { height: 240px; }
   #wf { flex: 1; min-height: 120px; }
+
   footer {
     display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-    padding: 6px 14px; font-size: 12px; color: var(--muted); background: var(--panel);
+    padding: 7px 14px; font-size: 12px; color: var(--muted); background: var(--panel);
     border-top: 1px solid var(--line);
   }
   #status.err { color: #ff8a80; }
+  .hint { color: var(--dim); }
+
+  /* ---------- スマホ ---------- */
+  @media (max-width: 640px) {
+    header { margin: 8px 8px 0; padding: 10px 12px; gap: 10px 14px; }
+    .f-freq { flex-basis: 100%; min-width: 0; }
+    .f-freq .row { min-width: 0; }
+    #freq { flex: 1; width: 0; min-width: 0; font-size: 34px; text-align: right; }
+    .step { width: 44px; height: 44px; }
+    .spacer { display: none; }
+    .side { flex-basis: 100%; }
+    #audioBtn { width: 100%; height: 44px; }
+    main { margin: 8px; }
+    #spec { height: 180px; }
+    .hint { display: none; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <div class="group">
-    <label for="freq">周波数</label>
-    <button class="step" id="down">−</button>
-    <input id="freq" type="text" inputmode="decimal" value="80.000">
-    <button class="step" id="up">＋</button>
-    <label>MHz</label>
+  <div class="field f-freq">
+    <span class="cap">周波数</span>
+    <div class="row">
+      <button class="step" id="down" title="下げる">−</button>
+      <input id="freq" type="text" inputmode="decimal" value="80.000" aria-label="周波数 (MHz)">
+      <span class="unit">MHz</span>
+      <button class="step" id="up" title="上げる">＋</button>
+    </div>
   </div>
-  <div class="group">
-    <label for="mode">モード</label>
-    <select id="mode"><option>WFM</option><option>NFM</option><option>AM</option></select>
+  <div class="field">
+    <span class="cap">モード</span>
+    <div class="seg" id="mode" role="radiogroup" aria-label="モード">
+      <button data-mode="WFM" class="on">WFM</button><button data-mode="NFM">NFM</button><button data-mode="AM">AM</button>
+    </div>
   </div>
-  <div class="group">
-    <label for="gain">ゲイン</label>
+  <div class="field">
+    <label class="cap" for="gain">ゲイン</label>
     <select id="gain"></select>
   </div>
-  <div class="group">
-    <label for="preset">プリセット</label>
+  <div class="field">
+    <label class="cap" for="vol">音量</label>
+    <div class="row"><input id="vol" type="range" min="0" max="100" value="60"><span id="volPct">60%</span></div>
+  </div>
+  <div class="field">
+    <label class="cap" for="preset">プリセット</label>
     <select id="preset">
       <option value="">選択…</option>
       <option value="WFM,80.0">FM放送 (76〜95MHz)</option>
@@ -73,11 +153,11 @@
       <option value="AM,1090.0">ADS-B 1090MHz（表示のみ）</option>
     </select>
   </div>
-  <div class="group">
-    <label for="vol">音量</label>
-    <input id="vol" type="range" min="0" max="100" value="60">
+  <div class="spacer"></div>
+  <div class="field side">
+    <span id="pill" class="wait">● 接続中</span>
+    <button id="audioBtn">🔊 音声オン</button>
   </div>
-  <button id="audioBtn">🔊 音声オン</button>
 </header>
 
 <main>
@@ -87,7 +167,7 @@
 
 <footer>
   <span id="status">接続中…</span>
-  <span>クリックで選局 ／ ホイールで微調整</span>
+  <span class="hint">クリックで選局 ／ ホイールで微調整</span>
 </footer>
 
 <script>
@@ -158,7 +238,10 @@ function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => setStatus("接続しました");
-  ws.onclose = () => { setStatus("切断されました。再接続しています…", true); setTimeout(connect, 2000); };
+  ws.onclose = () => {
+    setPill(["● 再接続中", "wait"]);
+    setStatus("切断されました。再接続しています…", true); setTimeout(connect, 2000);
+  };
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") { onState(JSON.parse(ev.data)); return; }
     const type = new Uint8Array(ev.data, 0, 1)[0];
@@ -176,17 +259,19 @@ function onState(s) {
   if (s.type !== "state") return;
   state = { ...state, ...s };
   if (document.activeElement !== $("freq")) $("freq").value = (s.freq / 1e6).toFixed(3);
-  $("mode").value = s.mode;
+  setModeUI(s.mode);
   if ($("gain").options.length === 0) {
     $("gain").add(new Option("自動", "auto"));
     s.gains.forEach((g) => $("gain").add(new Option(`${g.toFixed(1)} dB`, g)));
   }
   $("gain").value = s.gain === "auto" ? "auto" : String(s.gain);
+  setPill(s.error ? ["● エラー", "err"] : s.running ? ["● 受信中", "ok"] : ["● 待機中", ""]);
   if (s.error) setStatus(s.error + "（ページを再読み込みすると再試行します）", true);
   else setStatus(`${s.running ? "受信中" : "待機中"}  ${(s.freq / 1e6).toFixed(3)} MHz  ${s.mode}` +
                  `  ／ 接続数 ${s.clients ?? 1}${s.demo ? "  ［デモモード］" : ""}`);
   drawSpectrum();
 }
+function setPill([text, cls]) { $("pill").textContent = text; $("pill").className = cls; }
 function setStatus(t, err = false) { $("status").textContent = t; $("status").classList.toggle("err", err); }
 
 // ---------- 選局 ----------
@@ -205,12 +290,24 @@ $("freq").addEventListener("keydown", (e) => {
 $("freq").addEventListener("blur", () => { $("freq").value = (state.freq / 1e6).toFixed(3); });
 $("up").onclick = () => tune(state.freq / 1e6 + stepMHz());
 $("down").onclick = () => tune(state.freq / 1e6 - stepMHz());
-$("mode").onchange = () => { state.mode = $("mode").value; send({ cmd: "set", mode: state.mode }); };
+function setModeUI(m) {
+  document.querySelectorAll("#mode button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mode === m);
+    b.setAttribute("aria-checked", b.dataset.mode === m);
+  });
+}
+document.querySelectorAll("#mode button").forEach((b) => {
+  b.onclick = () => {
+    if (state.mode === b.dataset.mode) return;
+    state.mode = b.dataset.mode; setModeUI(state.mode);
+    send({ cmd: "set", mode: state.mode });
+  };
+});
 $("gain").onchange = () => send({ cmd: "set", gain: $("gain").value === "auto" ? "auto" : parseFloat($("gain").value) });
 $("preset").onchange = () => {
   const v = $("preset").value; if (!v) return;
   const [mode, f] = v.split(",");
-  state.mode = mode; $("mode").value = mode;
+  state.mode = mode; setModeUI(mode);
   send({ cmd: "set", mode, freq: parseFloat(f) * 1e6 });
   $("preset").value = "";
 };
@@ -228,7 +325,13 @@ function xToMHz(cv, clientX) {
 });
 
 // ---------- 音声 ----------
-$("vol").oninput = () => player && player.setVolume($("vol").value / 100);
+function showVol() {
+  const v = $("vol").value;
+  $("volPct").textContent = `${v}%`;
+  $("vol").style.setProperty("--pct", `${v}%`);
+}
+$("vol").oninput = () => { showVol(); if (player) player.setVolume($("vol").value / 100); };
+showVol();
 $("audioBtn").onclick = () => {
   if (player) {
     player.close(); player = null;
@@ -287,7 +390,7 @@ function drawSpectrum() {
   const c = specCtx, W = specCv.width, H = specCv.height;
   if (!W || !H) return;
   const dpr = window.devicePixelRatio || 1;
-  c.fillStyle = "#0b0d11"; c.fillRect(0, 0, W, H);
+  c.clearRect(0, 0, W, H);
   if (hw === null || !avg) return;
 
   const top = floor + 60, bot = floor - 10;

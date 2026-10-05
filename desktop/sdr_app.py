@@ -23,8 +23,10 @@ if sys.platform == "win32":
             os.add_dll_directory(d)
             os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
 
-from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtWidgets  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
+
+import theme  # noqa: E402
 
 try:
     from rtlsdr import RtlSdr
@@ -432,18 +434,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf = np.full((WF_ROWS, FFT_N), -100, dtype=np.float32)
         self.offsets = np.fft.fftshift(np.fft.fftfreq(FFT_N, 1 / FS))
 
-        # --- 操作パネル ---
+        # --- チューナーパネル ---
         self.freq = QtWidgets.QDoubleSpinBox()
+        self.freq.setObjectName("FreqSpin")
         self.freq.setRange(0.5, 1766.0)
         self.freq.setDecimals(3)
         self.freq.setSingleStep(0.1)
-        self.freq.setSuffix(" MHz")
         self.freq.setKeyboardTracking(False)
+        self.freq.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.freq.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.freq.setFont(theme.font(theme.MONO_FONTS, 24, bold=True))
+        self.freq.setMinimumWidth(170)
         self.freq.setValue(80.0)
-        self.freq.setMinimumWidth(140)
+        self.freq.setToolTip("数値を入力して Enter、またはホイールで選局")
+        self.down_btn = QtWidgets.QPushButton("−")
+        self.up_btn = QtWidgets.QPushButton("＋")
+        for b in (self.down_btn, self.up_btn):
+            b.setProperty("kind", "step")
+            b.setAutoRepeat(True)
+        mhz = QtWidgets.QLabel("MHz")
+        mhz.setProperty("role", "heading")
+        freq_row = QtWidgets.QHBoxLayout()
+        freq_row.setSpacing(6)
+        freq_row.addWidget(self.down_btn)
+        freq_row.addWidget(self.freq)
+        freq_row.addWidget(mhz)
+        freq_row.addWidget(self.up_btn)
 
-        self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["WFM", "NFM", "AM"])
+        self.mode = theme.Segmented(["WFM", "NFM", "AM"])
 
         self.gain = QtWidgets.QComboBox()
         self.gain.addItem("自動")
@@ -453,25 +471,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vol = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(50)
-        self.vol.setMaximumWidth(140)
+        self.vol.setFixedWidth(120)
+        self.vol_label = QtWidgets.QLabel("50%")
+        self.vol_label.setProperty("role", "caption")
+        self.vol_label.setMinimumWidth(34)
+        vol_row = QtWidgets.QHBoxLayout()
+        vol_row.addWidget(self.vol)
+        vol_row.addWidget(self.vol_label)
 
         self.preset = QtWidgets.QComboBox()
         for name, _, _ in PRESETS:
             self.preset.addItem(name)
 
         self.run_btn = QtWidgets.QPushButton("▶ 受信開始")
+        self.run_btn.setProperty("kind", "primary")
         self.run_btn.setCheckable(True)
-        self.run_btn.setMinimumWidth(120)
+        self.run_btn.setMinimumWidth(130)
+        self.run_btn.setMinimumHeight(40)
 
-        bar = QtWidgets.QHBoxLayout()
-        for label, w in [("周波数", self.freq), ("モード", self.mode), ("ゲイン", self.gain),
-                         ("音量", self.vol), (None, self.preset)]:
-            if label:
-                bar.addWidget(QtWidgets.QLabel(label))
-            bar.addWidget(w)
-            bar.addSpacing(10)
-        bar.addStretch()
-        bar.addWidget(self.run_btn)
+        self.state_label = QtWidgets.QLabel()
+        self.state_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        # キャプション行と部品行に分けたグリッドで、各項目の高さを揃える
+        tuner = theme.panel()
+        grid = QtWidgets.QGridLayout(tuner)
+        grid.setContentsMargins(16, 10, 16, 12)
+        grid.setHorizontalSpacing(24)
+        grid.setVerticalSpacing(2)
+        items = (("周波数", freq_row), ("モード", self.mode), ("ゲイン", self.gain),
+                 ("音量", vol_row), ("プリセット", self.preset))
+        for col, (label, w) in enumerate(items):
+            grid.addWidget(theme.caption(label), 0, col)
+            if isinstance(w, QtWidgets.QLayout):
+                grid.addLayout(w, 1, col, QtCore.Qt.AlignVCenter)
+            else:
+                grid.addWidget(w, 1, col, QtCore.Qt.AlignVCenter)
+        grid.setColumnStretch(len(items), 1)
+        grid.addWidget(self.state_label, 0, len(items) + 1)
+        grid.addWidget(self.run_btn, 1, len(items) + 1, QtCore.Qt.AlignVCenter)
 
         # --- 局サーチ ---
         self.scan_band = QtWidgets.QComboBox()
@@ -481,10 +518,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.prev_btn = QtWidgets.QPushButton("◀ 前の局")
         self.next_btn = QtWidgets.QPushButton("次の局 ▶")
         bar2 = QtWidgets.QHBoxLayout()
-        bar2.addWidget(QtWidgets.QLabel("サーチ範囲"))
+        bar2.setSpacing(8)
+        bar2.addWidget(theme.caption("サーチ範囲"))
         bar2.addWidget(self.scan_band)
         bar2.addWidget(self.scan_btn)
-        bar2.addSpacing(20)
+        bar2.addSpacing(16)
         bar2.addWidget(self.prev_btn)
         bar2.addWidget(self.next_btn)
         bar2.addStretch()
@@ -493,12 +531,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sat_window = None
 
         self.station_list = QtWidgets.QListWidget()
-        self.station_list.setMinimumWidth(200)
-        station_box = QtWidgets.QWidget()
+        self.station_list.setFont(theme.font(theme.MONO_FONTS, 10))
+        self.station_count = theme.caption("未サーチ")
+        station_box = theme.panel()
         sl = QtWidgets.QVBoxLayout(station_box)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.addWidget(QtWidgets.QLabel("見つかった局（クリックで選局）"))
-        sl.addWidget(self.station_list)
+        sl.setContentsMargins(10, 10, 10, 10)
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(theme.caption("見つかった局", "heading"))
+        head.addStretch()
+        head.addWidget(self.station_count)
+        sl.addLayout(head)
+        sl.addWidget(self.station_list, 1)
+        station_hint = theme.caption("「局サーチ」で受信できる局を探し、\nクリックで選局します。", "hint")
+        station_hint.setWordWrap(True)
+        sl.addWidget(station_hint)
+        station_box.setMinimumWidth(210)
         self.stations = []        # [(周波数Hz, 強さdB)]
         self.scan_mode = None
         self.scanning = False
@@ -506,16 +553,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress = QtWidgets.QProgressBar()
         self.progress.setMaximumWidth(200)
         self.progress.hide()
+        hint = theme.caption("クリック／赤線ドラッグで選局　ホイールで拡大", "hint")
+        self.statusBar().addPermanentWidget(hint)
         self.statusBar().addPermanentWidget(self.progress)
 
         # --- グラフ ---
-        pg.setConfigOptions(imageAxisOrder="row-major", antialias=False)
+        pg.setConfigOptions(imageAxisOrder="row-major", antialias=False,
+                            background=theme.C["plot"], foreground=theme.C["muted"])
+        axis_font = theme.font(theme.MONO_FONTS, 8)
         self.spec_plot = pg.PlotWidget()
         self.spec_plot.setLabel("left", "強度", units="dB")
         self.spec_plot.setMouseEnabled(x=True, y=False)
-        self.spec_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.curve = self.spec_plot.plot(pen=pg.mkPen("#4fc3f7", width=1))
-        self.marker = pg.InfiniteLine(angle=90, movable=True, pen=pg.mkPen("#ff5252", width=2))
+        self.spec_plot.showGrid(x=True, y=True, alpha=0.15)
+        self.spec_plot.getAxis("bottom").setStyle(showValues=False)
+        self.curve = self.spec_plot.plot(pen=pg.mkPen(theme.C["accent"], width=1.2),
+                                         fillLevel=-300, brush=pg.mkBrush(79, 195, 247, 30))
+        self.marker = pg.InfiniteLine(
+            angle=90, movable=True, pen=pg.mkPen(theme.C["marker"], width=2),
+            hoverPen=pg.mkPen("#ff8a80", width=3),
+            label="{value:.3f} MHz",
+            labelOpts={"position": 0.93, "color": "#ff8a80", "fill": (11, 13, 17, 200), "movable": True})
+        self.marker.label.setFont(theme.font(theme.MONO_FONTS, 10, bold=True))
         self.spec_plot.addItem(self.marker)
 
         self.wf_plot = pg.PlotWidget()
@@ -526,37 +584,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.img = pg.ImageItem()
         self.img.setLookupTable(pg.colormap.get("inferno").getLookupTable(nPts=256))
         self.wf_plot.addItem(self.img)
-        self.wf_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen("#ff5252", width=1, style=QtCore.Qt.DashLine))
+        self.wf_marker = pg.InfiniteLine(angle=90, pen=pg.mkPen(theme.C["marker"], width=1, style=QtCore.Qt.DashLine))
         self.wf_plot.addItem(self.wf_marker)
+        for plot in (self.spec_plot, self.wf_plot):
+            plot.setFrameShape(QtWidgets.QFrame.NoFrame)
+            for ax in ("left", "bottom"):
+                plot.getAxis(ax).setTickFont(axis_font)
+                plot.getAxis(ax).setPen(theme.C["line"])
+                plot.getAxis(ax).setTextPen(theme.C["muted"])
+        # 左の軸幅を揃えて、スペクトラムとウォーターフォールの横位置を合わせる
+        self.spec_plot.getAxis("left").setWidth(56)
+        self.wf_plot.getPlotItem().layout.setColumnFixedWidth(0, 56)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         split.addWidget(self.spec_plot)
         split.addWidget(self.wf_plot)
         split.setSizes([300, 420])
-
-        hint = QtWidgets.QLabel("グラフをクリック、または赤い線をドラッグして選局できます。")
-        hint.setStyleSheet("color: gray;")
+        split.setChildrenCollapsible(False)
 
         hsplit = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         hsplit.addWidget(split)
         hsplit.addWidget(station_box)
         hsplit.setStretchFactor(0, 1)
-        hsplit.setSizes([880, 220])
+        hsplit.setSizes([880, 230])
+        hsplit.setChildrenCollapsible(False)
 
         central = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(central)
-        lay.addLayout(bar)
+        lay.setContentsMargins(12, 12, 12, 8)
+        lay.setSpacing(10)
+        lay.addWidget(tuner)
         lay.addLayout(bar2)
         lay.addWidget(hsplit, 1)
-        lay.addWidget(hint)
         self.setCentralWidget(central)
-        self.statusBar().showMessage("停止中")
+        self.set_state("stopped")
 
         # --- イベント ---
         self.freq.valueChanged.connect(self.apply_params)
         self.mode.currentIndexChanged.connect(self.apply_params)
         self.gain.currentIndexChanged.connect(self.apply_params)
-        self.vol.valueChanged.connect(lambda v: setattr(self.audio, "volume", v / 100))
+        self.vol.valueChanged.connect(self.on_volume)
+        self.down_btn.clicked.connect(lambda: self.step_freq(-1))
+        self.up_btn.clicked.connect(lambda: self.step_freq(+1))
         self.preset.currentIndexChanged.connect(self.apply_preset)
         self.run_btn.toggled.connect(self.toggle_run)
         self.scan_btn.clicked.connect(self.toggle_scan)
@@ -577,12 +646,32 @@ class MainWindow(QtWidgets.QMainWindow):
         if SD_ERR:
             self.statusBar().showMessage(f"音声出力が使えません（{SD_ERR}）")
 
+    # --- 状態表示 ---
+    STATES = {"stopped": ("● 停止中", "dim"), "running": ("● 受信中", "ok"),
+              "scanning": ("● サーチ中", "accent"), "recording": ("● 録音中", "rec")}
+
+    def set_state(self, key):
+        text, color = self.STATES[key]
+        self.state_label.setText(text)
+        self.state_label.setStyleSheet(f"color: {theme.C[color]}; font-weight: bold;")
+
     # --- 設定 ---
+    def on_volume(self, v):
+        self.audio.volume = v / 100
+        self.vol_label.setText(f"{v}%")
+
+    def freq_step(self):
+        return 0.1 if self.mode.currentText() == "WFM" else 0.005
+
+    def step_freq(self, direction):
+        self.tune_to(self.freq.value() + direction * self.freq_step())
+
     def current_gain(self):
         i = self.gain.currentIndex()
         return "auto" if i == 0 else GAINS[i - 1]
 
     def apply_params(self):
+        self.freq.setSingleStep(self.freq_step())
         self.update_marker()
         if self.worker:
             self.worker.set_params(freq=self.freq.value() * 1e6,
@@ -600,7 +689,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.preset.blockSignals(False)
 
     def tune_to(self, mhz):
-        step = 0.1 if self.mode.currentText() == "WFM" else 0.005
+        step = self.freq_step()
         self.freq.setValue(round(mhz / step) * step)
 
     def on_click(self, ev, plot):
@@ -635,10 +724,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.freq.setValue(freq_hz / 1e6)
         self.apply_params()
         self.worker.recorder = IQRecorder(path)
-        for w in (self.freq, self.scan_btn, self.prev_btn, self.next_btn, self.preset, self.run_btn):
+        for w in self.tuning_widgets():
             w.setEnabled(False)
-        self.station_list.setEnabled(False)
+        self.set_state("recording")
         return None
+
+    def tuning_widgets(self):
+        """録音中は触れないようにする操作部品"""
+        return (self.freq, self.down_btn, self.up_btn, self.mode, self.scan_btn, self.prev_btn,
+                self.next_btn, self.preset, self.run_btn, self.station_list)
 
     def stop_recording(self):
         rec = self.worker.recorder if self.worker else None
@@ -646,9 +740,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.recorder = None
         if rec:
             rec.close()
-        for w in (self.freq, self.scan_btn, self.prev_btn, self.next_btn, self.preset, self.run_btn):
+        for w in self.tuning_widgets():
             w.setEnabled(True)
-        self.station_list.setEnabled(True)
+        self.set_state("running" if self.worker else "stopped")
         return rec.bytes if rec else 0
 
     # --- 局サーチ ---
@@ -666,7 +760,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_btn.setText("■ サーチ中止")
         self.progress.setValue(0)
         self.progress.show()
-        self.statusBar().showMessage(f"サーチ中… {band[0]}")
+        self.statusBar().showMessage(f"{band[0]} をサーチしています…")
+        self.set_state("scanning")
         self.worker.request_scan(band)
 
     def on_scan_progress(self, pct):
@@ -677,7 +772,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_btn.setText("📡 局サーチ")
         self.progress.hide()
         self.stations, self.scan_mode = found, mode
+        self.set_state("running" if self.worker else "stopped")
         self.station_list.clear()
+        self.station_count.setText(f"{len(found)}局")
         for f, snr in found:
             self.station_list.addItem(f"{f / 1e6:8.3f} MHz   +{snr:4.1f} dB")
         if found:
@@ -710,9 +807,9 @@ class MainWindow(QtWidgets.QMainWindow):
     def update_status(self):
         if self.scanning:
             return
-        msg = f"受信中  {self.freq.value():.3f} MHz  {self.mode.currentText()}  ゲイン {self.gain.currentText()}"
+        msg = f"{self.freq.value():.3f} MHz   {self.mode.currentText()}   ゲイン {self.gain.currentText()}"
         if self.worker:
-            msg += f"  ／ 音切れ {self.audio.underruns}回  処理落ち {self.worker.dropped}回"
+            msg += f"   ｜ 音切れ {self.audio.underruns}回 ・ 処理落ち {self.worker.dropped}回"
         if SD_ERR:
             msg += f"  ⚠ 音声出力が使えません（{SD_ERR}）"
         self.statusBar().showMessage(msg)
@@ -737,11 +834,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.worker.start()
             self.audio.start()
             self.run_btn.setText("■ 停止")
+            self.set_state("running")
             self.update_status()
         else:
             self.stop_worker()
             self.run_btn.setText("▶ 受信開始")
-            self.statusBar().showMessage("停止中")
+            self.set_state("stopped")
+            self.statusBar().clearMessage()
 
     def stop_worker(self):
         if self.scanning:
@@ -789,11 +888,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    families = QtGui.QFontDatabase.families()
-    for name in ("BIZ UDPGothic", "BIZ UDPゴシック"):
-        if name in families:
-            app.setFont(QtGui.QFont(name, 10))
-            break
+    theme.apply(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

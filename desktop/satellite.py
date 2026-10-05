@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import theme
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SETTINGS_FILE = os.path.join(HERE, "satellite_settings.json")
 TLE_FILE = os.path.join(HERE, "satellite_tle.txt")
@@ -107,7 +109,7 @@ class SatelliteWindow(QtWidgets.QWidget):
         super().__init__(None, QtCore.Qt.Window)
         self.main = main
         self.setWindowTitle("気象衛星（Meteor-M LRPT）")
-        self.resize(1000, 720)
+        self.resize(1180, 820)
         self.cfg = load_settings()
         self.passes = []
         self.done_passes = set()
@@ -119,6 +121,7 @@ class SatelliteWindow(QtWidgets.QWidget):
         self.lon = self._spin(-180, 180, self.cfg["lon"], 4, "°")
         self.min_elev = self._spin(0, 90, self.cfg["min_elev"], 0, "°")
         self.satdump = QtWidgets.QLineEdit(self.cfg["satdump"])
+        self.satdump.setPlaceholderText("satdump の実行ファイル")
         browse = QtWidgets.QPushButton("参照…")
         browse.clicked.connect(self.browse_satdump)
         self.freq_edits = {}
@@ -126,24 +129,33 @@ class SatelliteWindow(QtWidgets.QWidget):
         for s in SATELLITES:
             sp = self._spin(130, 140, self.cfg["freqs"][str(s["norad"])], 4, " MHz")
             self.freq_edits[s["norad"]] = sp
-            freq_box.addWidget(QtWidgets.QLabel(s["name"]))
+            freq_box.addWidget(theme.caption(s["name"]))
             freq_box.addWidget(sp)
+            freq_box.addSpacing(8)
         freq_box.addStretch()
 
         form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        form.setHorizontalSpacing(12)
         loc = QtWidgets.QHBoxLayout()
         for lab, w in (("緯度", self.lat), ("経度", self.lon), ("自動受信する最低仰角", self.min_elev)):
-            loc.addWidget(QtWidgets.QLabel(lab))
+            loc.addWidget(theme.caption(lab))
             loc.addWidget(w)
+            loc.addSpacing(8)
         loc.addStretch()
-        form.addRow("観測地点", loc)
-        form.addRow("受信周波数", freq_box)
+        form.addRow(theme.caption("観測地点", "heading"), loc)
+        form.addRow(theme.caption("受信周波数", "heading"), freq_box)
         sd = QtWidgets.QHBoxLayout()
         sd.addWidget(self.satdump, 1)
         sd.addWidget(browse)
-        form.addRow("SatDump", sd)
+        form.addRow(theme.caption("SatDump", "heading"), sd)
         settings_box = QtWidgets.QGroupBox("設定")
         settings_box.setLayout(form)
+
+        # --- 状態 ---
+        self.state = QtWidgets.QLabel("")
+        self.state.setObjectName("StatusCard")
+        self.state.setWordWrap(True)
 
         # --- パス一覧 ---
         self.tle_btn = QtWidgets.QPushButton("🔄 軌道データ更新")
@@ -152,67 +164,85 @@ class SatelliteWindow(QtWidgets.QWidget):
         self.pass_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.pass_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.pass_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.pass_table.setAlternatingRowColors(True)
+        self.pass_table.setShowGrid(False)
         self.pass_table.verticalHeader().hide()
+        self.pass_table.verticalHeader().setDefaultSectionSize(30)
 
         self.auto = QtWidgets.QCheckBox("自動受信（パスの時刻に自動で録音・デコード）")
         self.auto.setChecked(self.cfg["auto"])
+        pass_box = QtWidgets.QGroupBox("今後のパス（36時間）")
+        pl = QtWidgets.QVBoxLayout(pass_box)
+        head = QtWidgets.QHBoxLayout()
+        head.addWidget(self.auto)
+        head.addStretch()
+        head.addWidget(self.tle_btn)
+        pl.addLayout(head)
+        pl.addWidget(self.pass_table, 1)
+        legend = theme.caption("太字の青：次に自動受信するパス　灰色：最低仰角より低いパス（自動受信しない）", "hint")
+        pl.addWidget(legend)
+
+        # --- 手動録音 ---
         self.delete_bb = QtWidgets.QCheckBox("デコード後に録音ファイルを削除（1パス約0.8GB）")
         self.delete_bb.setChecked(self.cfg["delete_baseband"])
         self.manual_sat = QtWidgets.QComboBox()
         for s in SATELLITES:
             self.manual_sat.addItem(s["name"], s["norad"])
         self.rec_btn = QtWidgets.QPushButton("● 今すぐ録音")
+        self.rec_btn.setProperty("kind", "danger")
         self.decode_btn = QtWidgets.QPushButton("📂 録音ファイルをデコード…")
-        self.state = QtWidgets.QLabel("")
-        self.state.setStyleSheet("font-weight: bold;")
+        manual_box = QtWidgets.QGroupBox("手動録音・デコード")
+        ml = QtWidgets.QVBoxLayout(manual_box)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.manual_sat)
+        row.addWidget(self.rec_btn)
+        row.addStretch()
+        row.addWidget(self.decode_btn)
+        ml.addLayout(row)
+        ml.addWidget(self.delete_bb)
 
-        ctl = QtWidgets.QHBoxLayout()
-        ctl.addWidget(self.tle_btn)
-        ctl.addWidget(self.auto)
-        ctl.addStretch()
-        ctl2 = QtWidgets.QHBoxLayout()
-        ctl2.addWidget(QtWidgets.QLabel("手動録音"))
-        ctl2.addWidget(self.manual_sat)
-        ctl2.addWidget(self.rec_btn)
-        ctl2.addWidget(self.decode_btn)
-        ctl2.addWidget(self.delete_bb)
-        ctl2.addStretch()
-
-        left = QtWidgets.QVBoxLayout()
-        left.addWidget(settings_box)
-        left.addLayout(ctl)
-        left.addWidget(self.pass_table, 1)
-        left.addLayout(ctl2)
-        left.addWidget(self.state)
+        # --- ログ ---
         self.log = QtWidgets.QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
+        self.log.setFont(theme.font(theme.MONO_FONTS, 9))
         self.log.setPlaceholderText("ログ")
-        left.addWidget(self.log, 1)
+        log_box = QtWidgets.QGroupBox("ログ")
+        QtWidgets.QVBoxLayout(log_box).addWidget(self.log)
+
+        left = QtWidgets.QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(4)
+        left.addWidget(self.state)
+        left.addWidget(pass_box, 3)
+        left.addWidget(manual_box)
+        left.addWidget(settings_box)
+        left.addWidget(log_box, 2)
         left_w = QtWidgets.QWidget()
         left_w.setLayout(left)
 
         # --- 画像 ---
         self.image_list = QtWidgets.QListWidget()
         self.image_view = QtWidgets.QLabel("受信した画像がここに表示されます")
+        self.image_view.setObjectName("ImageView")
         self.image_view.setAlignment(QtCore.Qt.AlignCenter)
         self.image_view.setMinimumSize(200, 200)
         self.image_view.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-        open_dir = QtWidgets.QPushButton("フォルダを開く")
+        open_dir = QtWidgets.QPushButton("📁 フォルダを開く")
         open_dir.clicked.connect(lambda: self._open_dir(self.image_list.currentItem()))
-        right = QtWidgets.QVBoxLayout()
-        right.addWidget(QtWidgets.QLabel("受信画像"))
-        right.addWidget(self.image_list, 1)
+        image_box = QtWidgets.QGroupBox("受信画像")
+        right = QtWidgets.QVBoxLayout(image_box)
         right.addWidget(self.image_view, 3)
-        right.addWidget(open_dir)
-        right_w = QtWidgets.QWidget()
-        right_w.setLayout(right)
+        right.addWidget(self.image_list, 1)
+        right.addWidget(open_dir, 0, QtCore.Qt.AlignRight)
 
         split = QtWidgets.QSplitter()
         split.addWidget(left_w)
-        split.addWidget(right_w)
-        split.setSizes([600, 400])
+        split.addWidget(image_box)
+        split.setSizes([620, 480])
+        split.setChildrenCollapsible(False)
         lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 12)
         lay.addWidget(split)
 
         # --- イベント ---
@@ -255,7 +285,14 @@ class SatelliteWindow(QtWidgets.QWidget):
         sp.setValue(val)
         sp.setSuffix(suffix)
         sp.setKeyboardTracking(False)
+        sp.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)   # 入力またはホイールで変更
         return sp
+
+    def set_status(self, text, tone=""):
+        """上部の状態カードを更新する。tone: rec / busy / idle / ""（通常）"""
+        self.state.setText(text)
+        if self.state.property("tone") != tone:
+            theme.set_prop(self.state, "tone", tone)
 
     def write_log(self, text):
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {text}")
@@ -320,16 +357,26 @@ class SatelliteWindow(QtWidgets.QWidget):
             return
         now = datetime.now(timezone.utc)
         self.pass_table.setRowCount(0)
+        next_found = False
         for p in self.passes:
             if p[4] < now:
                 continue
             r = self.pass_table.rowCount()
             self.pass_table.insertRow(r)
+            low = p[5] < self.min_elev.value()
+            is_next = not low and not next_found
+            next_found = next_found or is_next
             vals = [p[0], self._local(p[2], True), self._local(p[3]), self._local(p[4]), f"{p[5]:.0f}°"]
             for c, v in enumerate(vals):
                 it = QtWidgets.QTableWidgetItem(v)
-                if p[5] < self.min_elev.value():
-                    it.setForeground(QtGui.QColor("gray"))
+                it.setTextAlignment(QtCore.Qt.AlignCenter)
+                if low:
+                    it.setForeground(QtGui.QColor(theme.C["dim"]))
+                elif is_next:
+                    it.setForeground(QtGui.QColor(theme.C["accent"]))
+                    f = it.font()
+                    f.setBold(True)
+                    it.setFont(f)
                 self.pass_table.setItem(r, c, it)
 
     @staticmethod
@@ -353,6 +400,7 @@ class SatelliteWindow(QtWidgets.QWidget):
             return
         self.recording = {"dir": d, "file": path, "end": end, "key": pass_key, "name": name}
         self.rec_btn.setText("■ 録音停止")
+        theme.set_prop(self.rec_btn, "active", "true")
         self.write_log(f"{name} の録音を開始しました（{freq / 1e6:.4f} MHz）")
 
     def stop_record(self, decode=True):
@@ -361,6 +409,7 @@ class SatelliteWindow(QtWidgets.QWidget):
         nbytes = self.main.stop_recording()
         rec, self.recording = self.recording, None
         self.rec_btn.setText("● 今すぐ録音")
+        theme.set_prop(self.rec_btn, "active", "false")
         self.write_log(f"録音を終了しました（{nbytes / 1e6:.0f} MB）")
         if decode:
             self.decode(rec["file"], rec["dir"])
@@ -377,17 +426,17 @@ class SatelliteWindow(QtWidgets.QWidget):
             end = self.recording["end"]
             size = os.path.getsize(self.recording["file"]) / 1e6 if os.path.exists(self.recording["file"]) else 0
             remain = f"／ 終了まで {int((end - now).total_seconds())} 秒" if end else ""
-            self.state.setText(f"🔴 録音中：{self.recording['name']}  {size:.0f} MB {remain}")
+            self.set_status(f"🔴 録音中：{self.recording['name']}　{size:.0f} MB {remain}", "rec")
             if end and now >= end:
                 self.stop_record()
             return
         if self.proc:
-            self.state.setText("⏳ SatDump でデコード中…")
+            self.set_status("⏳ SatDump でデコード中…", "busy")
             return
 
         upcoming = [p for p in self.passes if p[4] > now and p[5] >= self.min_elev.value()]
         if not upcoming:
-            self.state.setText("予定されているパスはありません（軌道データを更新してください）")
+            self.set_status("予定されているパスはありません（軌道データを更新してください）", "idle")
             return
         p = upcoming[0]
         key = (p[1], p[2].isoformat())
@@ -396,12 +445,13 @@ class SatelliteWindow(QtWidgets.QWidget):
                 self.done_passes.add(key)
                 self.start_record(p[0], p[1], end=p[4], pass_key=key)
             else:
-                self.state.setText(f"{p[0]} が通過中（最大仰角 {p[5]:.0f}°）")
+                self.set_status(f"🛰 {p[0]} が通過中（最大仰角 {p[5]:.0f}°）")
             return
         wait = int((p[2] - now).total_seconds())
         h, m, s = wait // 3600, wait % 3600 // 60, wait % 60
         mode = "自動受信 待機中" if self.auto.isChecked() else "次のパス"
-        self.state.setText(f"{mode}：{p[0]}  {self._local(p[2])} 開始（あと {h}時間{m:02d}分{s:02d}秒、最大仰角 {p[5]:.0f}°）")
+        self.set_status(f"{mode}：{p[0]}　{self._local(p[2])} 開始　あと {h}:{m:02d}:{s:02d}　最大仰角 {p[5]:.0f}°",
+                        "" if self.auto.isChecked() else "idle")
 
     # ---------- デコード ----------
     def decode_file_dialog(self):
@@ -458,13 +508,25 @@ class SatelliteWindow(QtWidgets.QWidget):
         select = None
         for f in files:
             rel = os.path.relpath(f, DATA_DIR)
-            it = QtWidgets.QListWidgetItem(rel)
+            it = QtWidgets.QListWidgetItem(self._image_label(rel))
+            it.setToolTip(rel)
             it.setData(QtCore.Qt.UserRole, f)
             self.image_list.addItem(it)
             if select is None and select_dir and f.startswith(select_dir):
                 select = it
         if select:
             self.image_list.setCurrentItem(select)
+
+    @staticmethod
+    def _image_label(rel):
+        """'20261005_094437_METEOR-M2-3/decoded/MSU-MR/x.png' → '10/05 09:44  METEOR-M2-3  ·  MSU-MR/x.png'"""
+        parts = rel.replace("\\", "/").split("/")
+        try:
+            t = datetime.strptime(parts[0][:15], "%Y%m%d_%H%M%S")
+            head = f"{t:%m/%d %H:%M}  {parts[0][16:]}"
+        except ValueError:
+            head = parts[0]
+        return f"{head}  ·  {'/'.join(parts[2:])}"
 
     def show_image(self, item):
         if not item:
