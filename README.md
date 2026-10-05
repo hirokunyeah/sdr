@@ -25,6 +25,7 @@ sdr/
 │   ├── satellite.py               気象衛星ウィンドウ
 │   ├── adsb.py                    ADS-B ウィンドウ（地図・機体一覧）
 │   ├── adsb_decoder.py            ADS-B の復調・解読
+│   ├── adsb_profile.py            ADS-B の断面図（機体同士の水平距離・高度差）
 │   ├── theme.py, icons/           画面のデザイン（ダークテーマ。Web版と同じ配色）
 │   ├── requirements.txt
 │   └── satellite_data/ など       実行時に作られるデータ・設定（※）

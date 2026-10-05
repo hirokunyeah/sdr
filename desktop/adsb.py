@@ -17,6 +17,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import theme
 from adsb_decoder import BLOCK, CENTER, FS, Demodulator, Tracker, distance_km
+from adsb_profile import ProfilePanel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -357,8 +358,16 @@ class AdsbWindow(QtWidgets.QWidget):
         hint.setWordWrap(True)
         ll.addWidget(hint)
 
+        # --- 断面図（地図の下） ---
+        self.profile = ProfilePanel()
+        left = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        left.addWidget(self.map)
+        left.addWidget(self.profile)
+        left.setSizes([520, 320])
+        left.setChildrenCollapsible(False)
+
         split = QtWidgets.QSplitter()
-        split.addWidget(self.map)
+        split.addWidget(left)
         split.addWidget(list_box)
         split.setSizes([800, 480])
         split.setStretchFactor(0, 1)
@@ -377,6 +386,7 @@ class AdsbWindow(QtWidgets.QWidget):
         self.trail.toggled.connect(self.refresh)
         self.home_btn.clicked.connect(self.go_home)
         self.table.itemClicked.connect(lambda it: self.select(self.table.item(it.row(), 0).text(), pan=True))
+        self.profile.selected.connect(lambda icao: self.select(icao, pan=True))
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -491,6 +501,7 @@ class AdsbWindow(QtWidgets.QWidget):
 
         self.js(f"update({json.dumps(planes)}, {json.dumps(self.selected)}, {json.dumps(self.trail.isChecked())})")
         self._fill_table(planes)
+        self.profile.update_planes(planes, self.selected, self.home)
 
     def _fill_table(self, planes):
         t = self.table
