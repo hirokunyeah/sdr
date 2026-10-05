@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+tools/src/rtl-sdr-blog/build/
+# archives から setup_windows.bat で展開するもの
+tools/windows/SatDump/
+tools/windows/rtl-sdr-blog-x64/
+# 実行時に生成されるデータ・個人設定
+desktop/satellite_data/
+desktop/satellite_settings.json
+desktop/satellite_tle.txt

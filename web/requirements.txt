@@ -1,0 +1,5 @@
+# Web版（server.py / Raspberry Pi 用）
+numpy==2.4.6
+scipy==1.17.1
+aiohttp==3.14.3
+pyrtlsdr==0.2.93

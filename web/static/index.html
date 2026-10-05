@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RTL-SDR Webレシーバー</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e6e8ee; --muted: #8a93a6;
+    --accent: #4fc3f7; --marker: #ff5252;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "BIZ UDPGothic", "BIZ UDPゴシック", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .group { display: flex; align-items: center; gap: 6px; }
+  label { color: var(--muted); font-size: 13px; }
+  input, select, button {
+    font: inherit; color: var(--text); background: #0f1218; border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px;
+  }
+  #freq { width: 120px; font-family: "BIZ UDGothic", "BIZ UDゴシック", ui-monospace, monospace;
+          font-size: 18px; text-align: right; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .step { width: 34px; padding: 6px 0; }
+  #audioBtn { background: #1e6f9f; border-color: #1e6f9f; min-width: 120px; }
+  #audioBtn.on { background: #7a2b2b; border-color: #7a2b2b; }
+  input[type=range] { padding: 0; width: 110px; }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  canvas { display: block; width: 100%; cursor: crosshair; }
+  #spec { height: 240px; border-bottom: 1px solid var(--line); }
+  #wf { flex: 1; min-height: 120px; }
+  footer {
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 6px 14px; font-size: 12px; color: var(--muted); background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  #status.err { color: #ff8a80; }
+</style>
+</head>
+<body>
+<header>
+  <div class="group">
+    <label for="freq">周波数</label>
+    <button class="step" id="down">−</button>
+    <input id="freq" type="text" inputmode="decimal" value="80.000">
+    <button class="step" id="up">＋</button>
+    <label>MHz</label>
+  </div>
+  <div class="group">
+    <label for="mode">モード</label>
+    <select id="mode"><option>WFM</option><option>NFM</option><option>AM</option></select>
+  </div>
+  <div class="group">
+    <label for="gain">ゲイン</label>
+    <select id="gain"></select>
+  </div>
+  <div class="group">
+    <label for="preset">プリセット</label>
+    <select id="preset">
+      <option value="">選択…</option>
+      <option value="WFM,80.0">FM放送 (76〜95MHz)</option>
+      <option value="AM,124.0">航空無線 (118〜137MHz)</option>
+      <option value="NFM,145.0">アマチュア無線 144MHz帯</option>
+      <option value="AM,1090.0">ADS-B 1090MHz（表示のみ）</option>
+    </select>
+  </div>
+  <div class="group">
+    <label for="vol">音量</label>
+    <input id="vol" type="range" min="0" max="100" value="60">
+  </div>
+  <button id="audioBtn">🔊 音声オン</button>
+</header>
+
+<main>
+  <canvas id="spec"></canvas>
+  <canvas id="wf"></canvas>
+</main>
+
+<footer>
+  <span id="status">接続中…</span>
+  <span>クリックで選局 ／ ホイールで微調整</span>
+</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const specCv = $("spec"), wfCv = $("wf");
+const specCtx = specCv.getContext("2d"), wfCtx = wfCv.getContext("2d");
+
+let ws = null;
+let state = { freq: 80e6, mode: "WFM", gain: 29.7, fs: 1.2e6, audioFs: 48000 };
+let hw = null, avg = null, floor = -60;
+let player = null;
+
+// ---------- カラーマップ（inferno風） ----------
+const LUT = (() => {
+  const stops = [[0, [0, 0, 4]], [0.25, [87, 16, 110]], [0.5, [188, 55, 84]],
+                 [0.75, [249, 142, 9]], [1, [252, 255, 164]]];
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let k = 0;
+    while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
+    const [t0, c0] = stops[k], [t1, c1] = stops[k + 1];
+    const f = (t - t0) / (t1 - t0);
+    for (let j = 0; j < 3; j++) lut[i * 3 + j] = c0[j] + (c1[j] - c0[j]) * f;
+  }
+  return lut;
+})();
+
+// ---------- 音声再生（HTTPでも動く ScriptProcessor 方式） ----------
+class Player {
+  constructor(rate) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC({ sampleRate: rate });
+    this.rate = rate;
+    this.buf = new Float32Array(rate * 2);
+    this.r = 0; this.w = 0; this.n = 0; this.ready = false;
+    this.gain = this.ctx.createGain();
+    this.node = this.ctx.createScriptProcessor(2048, 1, 1);
+    this.node.onaudioprocess = (e) => this.fill(e.outputBuffer.getChannelData(0));
+    this.node.connect(this.gain).connect(this.ctx.destination);
+  }
+  fill(out) {
+    if (!this.ready) {                       // 0.2秒ためてから再生開始
+      if (this.n < this.rate * 0.2) { out.fill(0); return; }
+      this.ready = true;
+    }
+    const L = this.buf.length;
+    for (let i = 0; i < out.length; i++) {
+      if (this.n > 0) { out[i] = this.buf[this.r]; this.r = (this.r + 1) % L; this.n--; }
+      else { out[i] = 0; this.ready = false; }
+    }
+  }
+  push(pcm) {
+    const L = this.buf.length, max = this.rate * 0.6;
+    for (let i = 0; i < pcm.length; i++) {
+      this.buf[this.w] = pcm[i] / 32768; this.w = (this.w + 1) % L;
+    }
+    this.n += pcm.length;
+    if (this.n > max) { const drop = this.n - this.rate * 0.3; this.r = (this.r + drop) % L; this.n -= drop; }
+  }
+  setVolume(v) { this.gain.gain.value = v; }
+  close() { this.ctx.close(); }
+}
+
+// ---------- 通信 ----------
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => setStatus("接続しました");
+  ws.onclose = () => { setStatus("切断されました。再接続しています…", true); setTimeout(connect, 2000); };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") { onState(JSON.parse(ev.data)); return; }
+    const type = new Uint8Array(ev.data, 0, 1)[0];
+    if (type === 1) {
+      const center = new DataView(ev.data).getFloat64(8, true);
+      onSpectrum(new Float32Array(ev.data, 16), center);
+    } else if (type === 2 && player) {
+      player.push(new Int16Array(ev.data, 8));
+    }
+  };
+}
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+function onState(s) {
+  if (s.type !== "state") return;
+  state = { ...state, ...s };
+  if (document.activeElement !== $("freq")) $("freq").value = (s.freq / 1e6).toFixed(3);
+  $("mode").value = s.mode;
+  if ($("gain").options.length === 0) {
+    $("gain").add(new Option("自動", "auto"));
+    s.gains.forEach((g) => $("gain").add(new Option(`${g.toFixed(1)} dB`, g)));
+  }
+  $("gain").value = s.gain === "auto" ? "auto" : String(s.gain);
+  if (s.error) setStatus(s.error + "（ページを再読み込みすると再試行します）", true);
+  else setStatus(`${s.running ? "受信中" : "待機中"}  ${(s.freq / 1e6).toFixed(3)} MHz  ${s.mode}` +
+                 `  ／ 接続数 ${s.clients ?? 1}${s.demo ? "  ［デモモード］" : ""}`);
+  drawSpectrum();
+}
+function setStatus(t, err = false) { $("status").textContent = t; $("status").classList.toggle("err", err); }
+
+// ---------- 選局 ----------
+function stepMHz() { return state.mode === "WFM" ? 0.1 : 0.005; }
+function tune(mhz) {
+  const st = stepMHz();
+  mhz = Math.round(mhz / st) * st;
+  state.freq = mhz * 1e6;
+  $("freq").value = mhz.toFixed(3);
+  send({ cmd: "set", freq: state.freq });
+  drawSpectrum();
+}
+$("freq").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { const v = parseFloat($("freq").value); if (!isNaN(v)) tune(v); $("freq").blur(); }
+});
+$("freq").addEventListener("blur", () => { $("freq").value = (state.freq / 1e6).toFixed(3); });
+$("up").onclick = () => tune(state.freq / 1e6 + stepMHz());
+$("down").onclick = () => tune(state.freq / 1e6 - stepMHz());
+$("mode").onchange = () => { state.mode = $("mode").value; send({ cmd: "set", mode: state.mode }); };
+$("gain").onchange = () => send({ cmd: "set", gain: $("gain").value === "auto" ? "auto" : parseFloat($("gain").value) });
+$("preset").onchange = () => {
+  const v = $("preset").value; if (!v) return;
+  const [mode, f] = v.split(",");
+  state.mode = mode; $("mode").value = mode;
+  send({ cmd: "set", mode, freq: parseFloat(f) * 1e6 });
+  $("preset").value = "";
+};
+
+function xToMHz(cv, clientX) {
+  const rect = cv.getBoundingClientRect();
+  return (hw + ((clientX - rect.left) / rect.width - 0.5) * state.fs) / 1e6;
+}
+[specCv, wfCv].forEach((cv) => {
+  cv.addEventListener("click", (e) => { if (hw !== null) tune(xToMHz(cv, e.clientX)); });
+  cv.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    tune(state.freq / 1e6 + (e.deltaY < 0 ? 1 : -1) * stepMHz());
+  }, { passive: false });
+});
+
+// ---------- 音声 ----------
+$("vol").oninput = () => player && player.setVolume($("vol").value / 100);
+$("audioBtn").onclick = () => {
+  if (player) {
+    player.close(); player = null;
+    $("audioBtn").textContent = "🔊 音声オン"; $("audioBtn").classList.remove("on");
+  } else {
+    player = new Player(state.audioFs || 48000);
+    player.setVolume($("vol").value / 100);
+    $("audioBtn").textContent = "🔇 音声オフ"; $("audioBtn").classList.add("on");
+  }
+};
+
+// ---------- 描画 ----------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  for (const cv of [specCv, wfCv]) {
+    const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+    if (cv.width !== w || cv.height !== h) {
+      cv.width = w; cv.height = h;
+      if (cv === wfCv) { wfCtx.fillStyle = "#000"; wfCtx.fillRect(0, 0, w, h); }
+    }
+  }
+  drawSpectrum();
+}
+window.addEventListener("resize", resize);
+
+function binToPixels(db, width) {   // 各ピクセルに対応するビンの最大値
+  const out = new Float32Array(width), n = db.length;
+  for (let x = 0; x < width; x++) {
+    const i0 = Math.floor(x * n / width), i1 = Math.max(i0 + 1, Math.floor((x + 1) * n / width));
+    let m = -1e9;
+    for (let i = i0; i < i1; i++) if (db[i] > m) m = db[i];
+    out[x] = m;
+  }
+  return out;
+}
+
+function onSpectrum(db, center) {
+  if (center !== hw) {                 // 周波数が変わったらリセット
+    hw = center; avg = Float32Array.from(db);
+    wfCtx.fillStyle = "#000"; wfCtx.fillRect(0, 0, wfCv.width, wfCv.height);
+  } else {
+    for (let i = 0; i < db.length; i++) avg[i] = 0.6 * avg[i] + 0.4 * db[i];
+  }
+  const sorted = Float32Array.from(db).sort();
+  floor = 0.9 * floor + 0.1 * sorted[sorted.length >> 1];
+  drawSpectrum();
+  drawWaterfall(db);
+}
+
+function niceStep(spanMHz, px) {
+  for (const s of [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]) if (px * s / spanMHz >= 90) return s;
+  return 1;
+}
+
+function drawSpectrum() {
+  const c = specCtx, W = specCv.width, H = specCv.height;
+  if (!W || !H) return;
+  const dpr = window.devicePixelRatio || 1;
+  c.fillStyle = "#0b0d11"; c.fillRect(0, 0, W, H);
+  if (hw === null || !avg) return;
+
+  const top = floor + 60, bot = floor - 10;
+  const y = (v) => H - (v - bot) / (top - bot) * H;
+  const f0 = (hw - state.fs / 2) / 1e6, span = state.fs / 1e6;
+  c.font = `${11 * dpr}px "BIZ UDGothic", ui-monospace, monospace`;
+  c.lineWidth = 1;
+
+  // 横グリッド（dB）
+  c.strokeStyle = "#1f2430"; c.fillStyle = "#6b7488";
+  for (let v = Math.ceil(bot / 10) * 10; v < top; v += 10) {
+    c.beginPath(); c.moveTo(0, y(v)); c.lineTo(W, y(v)); c.stroke();
+    c.fillText(`${v.toFixed(0)} dB`, 4 * dpr, y(v) - 3 * dpr);
+  }
+  // 縦グリッド（周波数）
+  const st = niceStep(span, W);
+  for (let f = Math.ceil(f0 / st) * st; f < f0 + span; f += st) {
+    const x = (f - f0) / span * W;
+    c.beginPath(); c.moveTo(x, 0); c.lineTo(x, H); c.stroke();
+    if (x > 50 * dpr) c.fillText(f.toFixed(st < 0.1 ? 2 : 1), x + 3 * dpr, H - 5 * dpr);
+  }
+  // スペクトラム
+  const px = binToPixels(avg, W);
+  c.beginPath();
+  for (let x = 0; x < W; x++) { const yy = y(px[x]); x ? c.lineTo(x, yy) : c.moveTo(x, yy); }
+  c.strokeStyle = "#4fc3f7"; c.lineWidth = 1.2 * dpr; c.stroke();
+  c.lineTo(W, H); c.lineTo(0, H); c.closePath();
+  c.fillStyle = "rgba(79,195,247,0.12)"; c.fill();
+
+  // 選局マーカー
+  const mx = (state.freq / 1e6 - f0) / span * W;
+  c.strokeStyle = "#ff5252"; c.lineWidth = 2 * dpr;
+  c.beginPath(); c.moveTo(mx, 0); c.lineTo(mx, H); c.stroke();
+  c.fillStyle = "#ff8a80"; c.font = `bold ${13 * dpr}px "BIZ UDGothic", ui-monospace, monospace`;
+  const label = `${(state.freq / 1e6).toFixed(3)} MHz`;
+  const tw = c.measureText(label).width;
+  c.fillText(label, Math.min(mx + 6 * dpr, W - tw - 4 * dpr), 16 * dpr);
+}
+
+function drawWaterfall(db) {
+  const W = wfCv.width, H = wfCv.height;
+  if (!W || !H) return;
+  wfCtx.drawImage(wfCv, 0, 0, W, H - 1, 0, 1, W, H - 1);   // 1行下へずらす
+  const px = binToPixels(db, W);
+  const row = wfCtx.createImageData(W, 1), d = row.data;
+  const lo = floor - 3, hi = floor + 40;
+  for (let x = 0; x < W; x++) {
+    let v = Math.round((px[x] - lo) / (hi - lo) * 255);
+    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    d[x * 4] = LUT[v * 3]; d[x * 4 + 1] = LUT[v * 3 + 1]; d[x * 4 + 2] = LUT[v * 3 + 2]; d[x * 4 + 3] = 255;
+  }
+  wfCtx.putImageData(row, 0, 0);
+}
+
+resize();
+connect();
+</script>
+</body>
+</html>
