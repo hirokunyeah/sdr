@@ -79,8 +79,9 @@ class ProfilePanel(QtWidgets.QGroupBox):
         self.label_font = theme.font(theme.MONO_FONTS, 8)
 
         hint = theme.caption("点のクリックでその機体を選択（「選択した機体」基準なら、その機体が基準になります）。"
-                             "ホイール・ドラッグで拡大・移動、ダブルクリックで元の表示に戻ります。"
-                             f"帯：基準機の高度 ±{SEP_V_FT:,}ft　赤：水平 5NM 未満かつ高度差 {SEP_V_FT:,}ft 未満", "hint")
+                             "ホイール・ドラッグで拡大・移動（重なるラベルは隠れ、拡大すると表示）、ダブルクリックで元の表示に戻ります。"
+                             f"帯：基準機の高度 ±{SEP_V_FT:,}ft　赤：水平 5NM 未満かつ高度差 {SEP_V_FT:,}ft 未満　"
+                             "中抜きの点：位置がインターネットのデータ", "hint")
         hint.setWordWrap(True)
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -145,12 +146,16 @@ class ProfilePanel(QtWidgets.QGroupBox):
             else:
                 text = f"{name}\n{x:.0f}km {a['alt']:,}ft"
             color = alt_color(a["alt"])
+            net = a.get("src") == "net"      # インターネットのデータの機体は中抜きの点で描く
+            fill = QtGui.QColor(color)
+            if net:
+                fill.setAlpha(40)
+            edge = NEAR if near else "#ffffff" if a["icao"] == selected else color if net else theme.C["plot"]
             spots.append({
                 "pos": (x, a["alt"]), "data": a["icao"],
                 "symbol": "d" if is_ref else "o", "size": 15 if is_ref else 10,
-                "brush": pg.mkBrush(color),
-                "pen": pg.mkPen(NEAR if near else "#ffffff" if a["icao"] == selected else theme.C["plot"],
-                                width=2.5 if near or a["icao"] == selected else 1),
+                "brush": pg.mkBrush(fill),
+                "pen": pg.mkPen(edge, width=2.5 if near or a["icao"] == selected else 1.5 if net else 1),
             })
             lab = pg.TextItem(text, color=NEAR if near else theme.C["text"], anchor=(0, 1))
             lab.setFont(self.label_font)
@@ -193,10 +198,12 @@ class ProfilePanel(QtWidgets.QGroupBox):
             cands = [(g, -g - h), (g, g), (-g - w, -g - h), (-g - w, g),
                      (g, -g - 2 * h), (g, g + h), (-g - w, -g - 2 * h), (-g - w, g + h)]
             rects = [QtCore.QRectF(px + dx, py + dy, w, h) for dx, dy in cands]
-            free = [r for r in rects if not any(r.intersects(o) for o in placed)]
-            # 図の中に収まり他と重ならない位置 → 重ならない位置 → 図の中に収まる位置 → 右上 の順に選ぶ
-            r = next((r for r in free if view.contains(r)), None) or (free[0] if free else None) \
-                or next((r for r in rects if view.contains(r)), rects[0])
+            free = [r for r in rects if view.contains(r) and not any(r.intersects(o) for o in placed)]
+            # 図の中で他と重ならない置き場所がないラベルは隠す（基準機・接近機・選択機は必ず表示）。拡大すると表示される
+            lab.setVisible(bool(free) or lab.prio <= 2)
+            if not lab.isVisible():
+                continue
+            r = free[0] if free else next((r for r in rects if view.contains(r)), rects[0])
             placed.append(r)
             # TextItem は anchor=(0,1) なので、ラベルの左下の位置を渡す
             lab.setPos(vx0 + r.left() * psx, vy1 - r.bottom() * psy)

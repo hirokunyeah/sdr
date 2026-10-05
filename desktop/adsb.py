@@ -17,6 +17,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import theme
 from adsb_decoder import BLOCK, CENTER, FS, Demodulator, Tracker, distance_km
+from adsb_net import INTERVAL as NET_INTERVAL
+from adsb_net import RADIUS_NM, SOURCES, NetFeed, merge
 from adsb_profile import ProfilePanel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,6 +54,7 @@ MAP_HTML = """<!doctype html>
   .lbl { background: rgba(15,17,21,.75); color: %(text)s; border: 1px solid %(line)s;
          border-radius: 4px; padding: 1px 4px; font: 11px/1.25 monospace; box-shadow: none; }
   .lbl::before { display: none; }
+  .lbl .net { color: %(muted)s; font-size: 10px; }
   .leaflet-container { background: %(plot)s; }
   .leaflet-control-attribution { background: rgba(15,17,21,.7) !important; color: %(muted)s; }
   .leaflet-control-attribution a { color: %(accent)s; }
@@ -156,8 +159,10 @@ function update(list, sel, showTrail) {
       p.path.setAttribute("stroke-width", v ? "1.4" : "0.8");
       p.m.setZIndexOffset(v ? 1000 : 0);
     });
-    setIf(p, "stale", a.pos_age > %(stale)d, v => p.m.setOpacity(v ? 0.4 : 1));
-    setIf(p, "label", `${a.callsign || a.icao}${alt}`, v => p.m.setTooltipContent(v));
+    // 薄く表示：位置が古い機体、インターネットのデータの機体
+    setIf(p, "opacity", a.pos_age > %(stale)d ? 0.4 : a.src === "net" ? 0.6 : 1, v => p.m.setOpacity(v));
+    const net = a.src === "net" ? ' <span class="net">ネット</span>' : "";
+    setIf(p, "label", `${a.callsign || a.icao}${net}${alt}`, v => p.m.setTooltipContent(v));
     // 航跡は点が増えたときだけ描き直す（上限に達した後は先頭が消えるので末尾の点も見る）
     setIf(p, "trail", showTrail ? `${a.trail.length},${a.trail[a.trail.length - 1]}` : "",
           () => p.t.setLatLngs(showTrail ? a.trail : []));
@@ -169,6 +174,12 @@ function update(list, sel, showTrail) {
       delete planes[k];
     }
   }
+}
+let credit = null;
+function setCredit(html) {   // インターネットのデータの出典表示
+  if (credit) map.attributionControl.removeAttribution(credit);
+  credit = html;
+  if (credit) map.attributionControl.addAttribution(credit);
 }
 function focusPlane(icao) {
   const a = latest[icao];
@@ -277,7 +288,7 @@ class MapPage(QWebEnginePage):
 
 # ---------------- ウィンドウ ----------------
 class AdsbWindow(QtWidgets.QWidget):
-    COLUMNS = ["ICAO", "便名", "高度 ft", "速度 kt", "方位", "昇降 ft/分", "距離 km", "受信数", "最終"]
+    COLUMNS = ["ICAO", "便名", "位置", "高度 ft", "速度 kt", "方位", "昇降 ft/分", "距離 km", "機種", "受信数", "最終"]
 
     def __init__(self, main, gains):
         super().__init__(None, QtCore.Qt.Window)
@@ -291,6 +302,7 @@ class AdsbWindow(QtWidgets.QWidget):
         self.closed = False
         self.home = self._load_home()
         self.last_msgs, self.last_t = 0, time.monotonic()
+        self.shown = False   # ネットの機体を表示中か（表示をやめたときに消すため）
 
         # --- 操作 ---
         self.run_btn = QtWidgets.QPushButton("▶ 受信開始")
@@ -303,6 +315,13 @@ class AdsbWindow(QtWidgets.QWidget):
             self.gain.addItem(f"{g:.1f} dB", g)
         self.gain.setCurrentIndex(self.gain.findData(DEFAULT_GAIN))
         self.trail = QtWidgets.QCheckBox("航跡を表示")
+        self.net_chk = QtWidgets.QCheckBox("インターネットのデータも表示")
+        self.net_chk.setToolTip(f"受信地点の周辺（{RADIUS_NM}海里）の機体を、ADS-B 共有サービスから"
+                                f"{NET_INTERVAL}秒ごとに取得して表示します（SDR がなくても使えます）")
+        self.net_src = QtWidgets.QComboBox()
+        self.net_src.addItems(list(SOURCES))
+        self.net_src.setToolTip("取得先（どちらも無料・非商用向け）")
+        self.net = NetFeed(self)
         self.trail.setChecked(True)
         self.home_btn = QtWidgets.QPushButton("⌂ 受信地点に戻る")
         self.home_btn.setToolTip("受信地点は気象衛星ウィンドウの「観測地点」（緯度・経度）を使います")
@@ -316,6 +335,9 @@ class AdsbWindow(QtWidgets.QWidget):
         bar.addWidget(self.gain)
         bar.addSpacing(12)
         bar.addWidget(self.trail)
+        bar.addSpacing(12)
+        bar.addWidget(self.net_chk)
+        bar.addWidget(self.net_src)
         bar.addStretch()
         bar.addWidget(self.home_btn)
 
@@ -354,6 +376,7 @@ class AdsbWindow(QtWidgets.QWidget):
         ll.addWidget(self.count)
         ll.addWidget(self.table, 1)
         hint = theme.caption("行のクリックで地図をその機体へ移動します。灰色：位置不明、"
+                             "薄い文字：位置がインターネットのデータ、"
                              f"{STALE_SEC}秒以上位置が更新されない機体は地図で薄く表示", "hint")
         hint.setWordWrap(True)
         ll.addWidget(hint)
@@ -385,6 +408,8 @@ class AdsbWindow(QtWidgets.QWidget):
             lambda: self.worker and self.worker.set_gain(self.gain.currentData()))
         self.trail.toggled.connect(self.refresh)
         self.home_btn.clicked.connect(self.go_home)
+        self.net_chk.toggled.connect(self.on_net)
+        self.net_src.currentIndexChanged.connect(lambda: self.net_chk.isChecked() and self.on_net(True))
         self.table.itemClicked.connect(lambda it: self.select(self.table.item(it.row(), 0).text(), pan=True))
         self.profile.selected.connect(lambda icao: self.select(icao, pan=True))
 
@@ -426,6 +451,18 @@ class AdsbWindow(QtWidgets.QWidget):
     def go_home(self):
         self.home = self._load_home()
         self.js(f"setHome({self.home[0]}, {self.home[1]})")
+        if self.net_chk.isChecked():
+            self.on_net(True)    # 取得範囲の中心も変える
+        self.refresh()
+
+    def on_net(self, on):
+        if on:
+            src = self.net_src.currentText()
+            self.net.start(src, self.home)
+            self.js(f"setCredit({json.dumps(SOURCES[src]['credit'])})")
+        else:
+            self.net.stop()
+            self.js("setCredit(null)")
         self.refresh()
 
     def select(self, icao, pan=False):
@@ -483,21 +520,34 @@ class AdsbWindow(QtWidgets.QWidget):
 
     # ---------- 表示更新 ----------
     def refresh(self):
-        if not self.worker:
-            return
-        planes, total = self.worker.snapshot()
-        now = time.monotonic()
-        rate = (total - self.last_msgs) / max(now - self.last_t, 1e-3)
-        self.last_msgs, self.last_t = total, now
+        net_on = self.net_chk.isChecked()
+        if not self.worker and not net_on and not self.shown:
+            return      # 何も更新するものがない（停止後は最後の表示を残す）
+        status = []
+        local = []
+        if self.worker:
+            local, total = self.worker.snapshot()
+            now = time.monotonic()
+            rate = (total - self.last_msgs) / max(now - self.last_t, 1e-3)
+            self.last_msgs, self.last_t = total, now
+            with_pos = sum(a["lat"] is not None for a in local)
+            status.append(f"受信中：機体 {len(local)}（位置あり {with_pos}）　{rate:.0f} メッセージ/秒"
+                          f"　｜ 累計 {total}　処理落ち {self.worker.dropped}回")
+        if net_on:
+            status.append(self.net.status())
+        # ネットの表示をやめたときは、ネットの機体を消すために1回だけ更新する
+        self.shown = net_on
+        planes = merge(local, self.net.snapshot() if net_on else [])
 
         home = self.home
         for a in planes:
             a["dist"] = distance_km(home[0], home[1], a["lat"], a["lon"]) if a["lat"] is not None else None
         planes.sort(key=lambda a: (a["dist"] is None, a["dist"] or 0, a["icao"]))
-        with_pos = sum(a["lat"] is not None for a in planes)
-        self.set_status(f"受信中：機体 {len(planes)}（位置あり {with_pos}）　{rate:.0f} メッセージ/秒"
-                        f"　｜ 累計 {total}　処理落ち {self.worker.dropped}回")
-        self.count.setText(f"{len(planes)} 機")
+        if status:
+            self.set_status("　｜ ".join(status))
+        n_local = sum(a["src"] == "local" and a["lat"] is not None for a in planes)
+        n_net = sum(a["src"] == "net" for a in planes)
+        self.count.setText(f"{len(planes)} 機（位置：自局 {n_local}・ネット {n_net}）" if net_on else f"{len(planes)} 機")
 
         self.js(f"update({json.dumps(planes)}, {json.dumps(self.selected)}, {json.dumps(self.trail.isChecked())})")
         self._fill_table(planes)
@@ -510,17 +560,20 @@ class AdsbWindow(QtWidgets.QWidget):
         fmt = lambda v, f="{:,}": "" if v is None else f.format(v)  # noqa: E731
         sel_row = None
         for r, a in enumerate(planes):
-            vals = [a["icao"], a["callsign"], fmt(a["alt"]), fmt(a["speed"]),
+            src = "" if a["lat"] is None else "自局" if a["src"] == "local" else "ネット"
+            vals = [a["icao"], a["callsign"], src, fmt(a["alt"]), fmt(a["speed"]),
                     fmt(a["track"], "{:.0f}°"), fmt(a["vrate"], "{:+,}"), fmt(a["dist"], "{:.0f}"),
-                    str(a["msgs"]), f"{a['age']:.0f}秒前"]
+                    a["type"], fmt(a["msgs"]), f"{a['age']:.0f}秒前"]
+            color = theme.C["dim" if a["lat"] is None else "muted" if a["src"] == "net" else "text"]
             for c, v in enumerate(vals):
                 it = t.item(r, c)
                 if it is None:
                     it = QtWidgets.QTableWidgetItem()
                     t.setItem(r, c, it)
                 it.setText(v)
-                it.setTextAlignment((QtCore.Qt.AlignLeft if c < 2 else QtCore.Qt.AlignRight) | QtCore.Qt.AlignVCenter)
-                it.setForeground(QtGui.QColor(theme.C["text" if a["lat"] is not None else "dim"]))
+                left = c < 3 or c == 8
+                it.setTextAlignment((QtCore.Qt.AlignLeft if left else QtCore.Qt.AlignRight) | QtCore.Qt.AlignVCenter)
+                it.setForeground(QtGui.QColor(color))
             if a["icao"] == self.selected:
                 sel_row = r
         t.blockSignals(True)
@@ -533,10 +586,12 @@ class AdsbWindow(QtWidgets.QWidget):
 
     # ---------- 終了処理 ----------
     def closeEvent(self, ev):
-        # 閉じたら SDR を空ける
+        # 閉じたら SDR を空け、ネットからの取得も止める
         self.stop()
+        self.net_chk.setChecked(False)
         super().closeEvent(ev)
 
     def shutdown(self):
         self.closed = True
         self.stop()
+        self.net.stop()
