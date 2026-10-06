@@ -8,6 +8,7 @@ tools/windows/rtl-sdr-blog-x64/
 # 実行時に生成されるデータ・個人設定
 desktop/satellite_data/
 desktop/adsb_data/
+desktop/region_data/
 desktop/satellite_settings.json
 desktop/satellite_tle.txt
 desktop/scan_last.csv

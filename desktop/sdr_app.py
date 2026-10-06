@@ -720,6 +720,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.adsb_btn.setToolTip("航空機の位置を地図に表示します（受信中は SDR を ADS-B 専用で使います）")
         bar2.addWidget(self.adsb_btn)
         self.adsb_window = None
+        self.region_btn = QtWidgets.QPushButton("🗾 地域統計")
+        self.region_btn.setToolTip("人口・世帯・住宅・自動車・所得などの市区町村別の統計を地図で表示します（SDR は使いません）")
+        bar2.addWidget(self.region_btn)
+        self.region_window = None
 
         self.station_list = QtWidgets.QListWidget()
         self.station_list.setFont(theme.font(theme.MONO_FONTS, 10))
@@ -824,6 +828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_band.activated.connect(self.on_scan_band)
         self.sat_btn.clicked.connect(self.open_satellite)
         self.adsb_btn.clicked.connect(self.open_adsb)
+        self.region_btn.clicked.connect(self.open_region_stats)
         self.prev_btn.clicked.connect(lambda: self.seek(-1))
         self.next_btn.clicked.connect(lambda: self.seek(+1))
         self.station_list.itemClicked.connect(
@@ -946,6 +951,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.adsb_window = adsb.AdsbWindow(self, GAINS)
         self.adsb_window.show()
         self.adsb_window.raise_()
+
+    # --- 地域統計 ---
+    def open_region_stats(self):
+        if self.region_window is None:
+            import region_stats
+            self.region_window = region_stats.RegionStatsWindow()
+        self.region_window.show()
+        self.region_window.raise_()
 
     def adsb_running(self):
         return bool(self.adsb_window and self.adsb_window.running)
@@ -1156,6 +1169,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.adsb_window.close()
         if self.sat_window:
             self.sat_window.shutdown()
+        if self.region_window:
+            self.region_window.close()
         self.stop_recording()
         self.stop_worker()
         super().closeEvent(ev)
