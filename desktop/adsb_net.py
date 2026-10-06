@@ -51,6 +51,32 @@ def parse(data, now):
     return out
 
 
+def add_trails(trails, planes):
+    """取得した機体の位置を航跡（ICAO → 点のリスト）に加える。今回いなかった機体の航跡は捨てる"""
+    out = {}
+    for p in planes:
+        t = trails.get(p["icao"], [])
+        pt = (round(p["lat"], 5), round(p["lon"], 5))
+        if not t or t[-1] != pt:
+            t = (t + [pt])[-TRAIL_MAX:]
+        out[p["icao"]] = t
+    return out
+
+
+def snapshot(planes, trails, now):
+    """画面表示用（Tracker.snapshot() と同じ形）。古くなった機体は除く"""
+    out = []
+    for p in planes:
+        age = now - p["t_seen"]
+        if age > AIRCRAFT_TIMEOUT:
+            continue
+        s = {k: v for k, v in p.items() if k not in ("t_seen", "t_pos")}
+        s.update(age=age, pos_age=now - p["t_pos"], trail=list(trails.get(p["icao"], [])),
+                 seen_pos=p["t_pos"], src="net")
+        out.append(s)
+    return out
+
+
 def merge(local, net):
     """自局の機体（local）にネットの機体（net）を ICAO 番号で照合して加える。
     src は位置の出どころ："local"（自局で受信）／"net"（インターネット）"""
@@ -77,6 +103,7 @@ def merge(local, net):
 class NetFeed(QtCore.QObject):
     """一定間隔でネットから取得する。取得は別スレッドで行い、結果はメインスレッドで受け取る"""
     _fetched = QtCore.Signal(object, str)    # (JSON, エラー)
+    received = QtCore.Signal(object, float)  # 取得できたとき (parse() の結果, 取得時刻)。記録用
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -87,6 +114,7 @@ class NetFeed(QtCore.QObject):
         self.error = ""
         self.fetched_at = None
         self.busy = False
+        self.on = False          # 取得中か（start〜stop の間）
         self.interval = INTERVAL
         self.gen = 0             # 取得の世代。停止・切り替え前に出した取得の結果を捨てるのに使う
         self.timer = QtCore.QTimer(self)
@@ -102,10 +130,12 @@ class NetFeed(QtCore.QObject):
         self.stop()
         self.source, self.center = source, center
         self.interval = INTERVAL
+        self.on = True
         self.timer.start(0)
 
     def stop(self):
         self.timer.stop()
+        self.on = False
         self.planes, self.trails = [], {}
         self.error, self.fetched_at = "", None
         self.gen += 1
@@ -133,6 +163,9 @@ class NetFeed(QtCore.QObject):
         gen, data = result
         self.busy = False
         if gen != self.gen:      # 停止・切り替え済み
+            # 取得中に切り替えたときは、新しい取得が busy で飛ばされているので、ここで取得し直す
+            if self.on and not self.timer.isActive():
+                self.timer.start(0)
             return
         if err:
             self.error = err
@@ -140,31 +173,15 @@ class NetFeed(QtCore.QObject):
         else:
             now = time.time()
             planes = parse(data, now)
-            trails = {}
-            for p in planes:
-                t = self.trails.get(p["icao"], [])
-                pt = (round(p["lat"], 5), round(p["lon"], 5))
-                if not t or t[-1] != pt:
-                    t = (t + [pt])[-TRAIL_MAX:]
-                trails[p["icao"]] = t
-            self.planes, self.trails = planes, trails
+            self.planes, self.trails = planes, add_trails(self.trails, planes)
             self.error, self.fetched_at = "", now
             self.interval = INTERVAL
+            self.received.emit(planes, now)
         self.timer.start(int(self.interval * 1000))
 
     def snapshot(self, now=None):
         """画面表示用（Tracker.snapshot() と同じ形）。古くなった機体は除く"""
-        now = time.time() if now is None else now
-        out = []
-        for p in self.planes:
-            age = now - p["t_seen"]
-            if age > AIRCRAFT_TIMEOUT:
-                continue
-            s = {k: v for k, v in p.items() if k not in ("t_seen", "t_pos")}
-            s.update(age=age, pos_age=now - p["t_pos"], trail=list(self.trails.get(p["icao"], [])),
-                     seen_pos=p["t_pos"], src="net")
-            out.append(s)
-        return out
+        return snapshot(self.planes, self.trails, time.time() if now is None else now)
 
     def status(self):
         if self.error:

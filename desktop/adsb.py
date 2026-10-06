@@ -4,6 +4,7 @@ ADS-B（1090MHz）受信ウィンドウ
   航空機が送信している ADS-B を受信して、機体の位置・便名・高度・速度を地図と一覧に表示する。
   受信中は SDR を 1090MHz・2MS/s で使うため、メイン画面の受信とは同時に使えない。
   地図は Leaflet（インターネット接続が必要）。QtWebEngine がない環境では一覧だけ表示する。
+  受信したデータはファイルに記録でき、後から記録の時間の流れどおりに再生できる（adsb_record.py）。
 """
 import json
 import os
@@ -15,11 +16,13 @@ import time
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import adsb_record
 import theme
 from adsb_decoder import BLOCK, CENTER, FS, Demodulator, Tracker, distance_km
 from adsb_net import INTERVAL as NET_INTERVAL
 from adsb_net import RADIUS_NM, SOURCES, NetFeed, merge
 from adsb_profile import ProfilePanel
+from adsb_record import Recorder, ReplayWorker
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -202,6 +205,7 @@ class AdsbWorker(QtCore.QThread):
         self._gain_dirty = False
         self._running = True
         self.dropped = 0
+        self.recorder = None     # 記録中は Recorder（メインスレッドが付け外しする）
 
     def set_gain(self, gain):
         with self.lock:
@@ -262,6 +266,9 @@ class AdsbWorker(QtCore.QThread):
                     with self.lock:
                         for m in msgs:
                             self.tracker.update(m, now)
+                    rec = self.recorder
+                    if rec:
+                        rec.messages(now, msgs)
         except Exception as e:
             self.failed.emit(f"受信中にエラーが発生しました。\n\n{e}")
         finally:
@@ -297,6 +304,8 @@ class AdsbWindow(QtWidgets.QWidget):
         self.setWindowTitle("ADS-B（航空機の位置）")
         self.resize(1280, 800)
         self.worker = None
+        self.recorder = None     # 記録中の Recorder
+        self.replay = None       # 再生中の ReplayWorker
         self.selected = None
         self.map_ready = False
         self.closed = False
@@ -323,6 +332,11 @@ class AdsbWindow(QtWidgets.QWidget):
         self.net_src.setToolTip("取得先（どちらも無料・非商用向け）")
         self.net = NetFeed(self)
         self.trail.setChecked(True)
+        self.rec_chk = QtWidgets.QCheckBox("記録")
+        self.rec_chk.setToolTip("受信したデータ（自局・インターネット）を adsb_data フォルダに保存します。"
+                                "「記録を再生」で後から見られます")
+        self.open_btn = QtWidgets.QPushButton("記録を再生…")
+        self.open_btn.setToolTip("保存した記録を、記録したときの時間の流れどおりに再生します（SDR は使いません）")
         self.home_btn = QtWidgets.QPushButton("⌂ 受信地点に戻る")
         self.home_btn.setToolTip("受信地点は気象衛星ウィンドウの「観測地点」（緯度・経度）を使います")
         self.state = QtWidgets.QLabel("")
@@ -338,8 +352,34 @@ class AdsbWindow(QtWidgets.QWidget):
         bar.addSpacing(12)
         bar.addWidget(self.net_chk)
         bar.addWidget(self.net_src)
+        bar.addSpacing(12)
+        bar.addWidget(self.rec_chk)
         bar.addStretch()
+        bar.addWidget(self.open_btn)
         bar.addWidget(self.home_btn)
+
+        # --- 再生の操作（再生中だけ表示） ---
+        self.pause_btn = QtWidgets.QPushButton()
+        self.pause_btn.setMinimumWidth(110)
+        self.seek = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.seek.setPageStep(60)
+        self.pos_lbl = QtWidgets.QLabel("")
+        self.pos_lbl.setFont(theme.font(theme.MONO_FONTS, 9))
+        self.speed = QtWidgets.QComboBox()
+        for v in adsb_record.SPEEDS:
+            self.speed.addItem(f"×{v}", v)
+        self.speed.setToolTip("再生速度")
+        self.end_btn = QtWidgets.QPushButton("■ 再生を終了")
+        self.play_bar = QtWidgets.QWidget()
+        pb = QtWidgets.QHBoxLayout(self.play_bar)
+        pb.setContentsMargins(0, 0, 0, 0)
+        pb.addWidget(self.pause_btn)
+        pb.addWidget(self.seek, 1)
+        pb.addWidget(self.pos_lbl)
+        pb.addWidget(theme.caption("速度"))
+        pb.addWidget(self.speed)
+        pb.addWidget(self.end_btn)
+        self.play_bar.hide()
 
         # --- 地図 ---
         if WEBENGINE_ERR is None:
@@ -400,6 +440,7 @@ class AdsbWindow(QtWidgets.QWidget):
         lay.setContentsMargins(12, 8, 12, 12)
         lay.addWidget(self.state)
         lay.addLayout(bar)
+        lay.addWidget(self.play_bar)
         lay.addWidget(split, 1)
 
         # --- イベント ---
@@ -412,6 +453,15 @@ class AdsbWindow(QtWidgets.QWidget):
         self.net_src.currentIndexChanged.connect(lambda: self.net_chk.isChecked() and self.on_net(True))
         self.table.itemClicked.connect(lambda it: self.select(self.table.item(it.row(), 0).text(), pan=True))
         self.profile.selected.connect(lambda icao: self.select(icao, pan=True))
+        self.rec_chk.toggled.connect(lambda: self._sync_recorder())
+        self.net.received.connect(lambda planes, now: self.recorder and self.recorder.net(now, planes))
+        self.open_btn.clicked.connect(self.open_replay)
+        self.pause_btn.clicked.connect(self.on_pause)
+        self.speed.currentIndexChanged.connect(lambda: self.replay and self.replay.set_speed(self.speed.currentData()))
+        self.seek.sliderMoved.connect(self._show_seek_pos)
+        self.seek.sliderReleased.connect(self.on_seek)
+        self.seek.valueChanged.connect(lambda: not self.seek.isSliderDown() and self.on_seek())
+        self.end_btn.clicked.connect(lambda: self.stop_replay())
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -449,7 +499,10 @@ class AdsbWindow(QtWidgets.QWidget):
                          f"（コード {code}）。一覧は使えます。<br>docs/troubleshooting.md の「ADS-B」を参照してください。</body>")
 
     def go_home(self):
-        self.home = self._load_home()
+        if self.replay and self.replay.ready and self.replay.rec.home:
+            self.home = self.replay.rec.home      # 再生中は記録したときの受信地点
+        else:
+            self.home = self._load_home()
         self.js(f"setHome({self.home[0]}, {self.home[1]})")
         if self.net_chk.isChecked():
             self.on_net(True)    # 取得範囲の中心も変える
@@ -463,6 +516,7 @@ class AdsbWindow(QtWidgets.QWidget):
         else:
             self.net.stop()
             self.js("setCredit(null)")
+        self._sync_recorder()
         self.refresh()
 
     def select(self, icao, pan=False):
@@ -480,11 +534,15 @@ class AdsbWindow(QtWidgets.QWidget):
         if on:
             self.start()
         else:
+            # 「■ 停止」を押したときは、インターネットからの取得も止める
+            # （気象衛星の録音などによる一時停止では止めない）
+            self.net_chk.setChecked(False)
             self.stop()
 
     def start(self):
         if self.closed or self.worker:
             return
+        self.stop_replay()
         main = self.main
         if main.worker and main.worker.recorder:
             self.set_status("気象衛星の録音中は ADS-B を受信できません", "idle")
@@ -495,6 +553,7 @@ class AdsbWindow(QtWidgets.QWidget):
             main.statusBar().showMessage("ADS-B 受信のため、メイン画面の受信を停止しました", 5000)
         self.worker = AdsbWorker(self.gain.currentData())
         self.worker.failed.connect(self.on_failed)
+        self._sync_recorder()
         self.worker.start()
         self.last_msgs, self.last_t = 0, time.monotonic()
         self._set_btn(True)
@@ -505,8 +564,9 @@ class AdsbWindow(QtWidgets.QWidget):
             self.worker.stop()
             self.worker.wait(3000)
             self.worker = None
+        saved = self._sync_recorder()
         self._set_btn(False)
-        self.set_status(reason or "停止中", "idle")
+        self.set_status(reason or ("停止中" + saved), "idle")
 
     def _set_btn(self, on):
         self.run_btn.blockSignals(True)
@@ -518,13 +578,123 @@ class AdsbWindow(QtWidgets.QWidget):
         self.stop("エラーで停止しました")
         QtWidgets.QMessageBox.critical(self, "ADS-B", msg)
 
+    # ---------- 記録 ----------
+    def _sync_recorder(self):
+        """「記録」が入っていて受信中（自局かネット）なら記録し、そうでなければ閉じる。
+        閉じたときは保存先を知らせる文字列を返す"""
+        want = self.rec_chk.isChecked() and (self.worker is not None or self.net_chk.isChecked())
+        saved = ""
+        if want and not self.recorder:
+            try:
+                self.recorder = Recorder(self.home)
+            except OSError as e:
+                self.rec_chk.setChecked(False)
+                QtWidgets.QMessageBox.critical(self, "ADS-B", f"記録用のファイルを作れませんでした。\n\n{e}")
+        elif not want and self.recorder:
+            self.recorder.close()
+            saved = f"　｜ 記録を保存しました：{self.recorder.name}（{self.recorder.count:,} 件）"
+            self.recorder = None
+            if not self.worker and not self.net_chk.isChecked():
+                self.set_status("停止中" + saved, "idle")
+        if self.worker:
+            self.worker.recorder = self.recorder
+        return saved
+
+    # ---------- 再生 ----------
+    def open_replay(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "ADS-B の記録を再生", adsb_record.DATA_DIR if os.path.isdir(adsb_record.DATA_DIR) else HERE,
+            "ADS-B の記録 (*.log.gz *.log);;すべて (*)")
+        if not path:
+            return
+        self.stop_replay(clear=False)
+        self.stop()                    # SDR とネットの受信は止めて、記録だけを表示する
+        self.net_chk.setChecked(False)
+        self.replay = ReplayWorker(path)
+        self.replay.set_speed(self.speed.currentData())
+        self.replay.failed.connect(self.on_replay_failed)
+        self.replay.loaded.connect(self.on_replay_loaded)
+        self.replay.ended.connect(self._update_play_bar)
+        self.replay.start()
+        for w in (self.run_btn, self.net_chk, self.net_src, self.rec_chk):
+            w.setEnabled(False)
+        self.play_bar.show()
+        self.play_bar.setEnabled(False)
+        self.replay_name = os.path.basename(path)
+        self.set_status(f"記録を読み込み中… {self.replay_name}", "idle")
+
+    def on_replay_loaded(self):
+        rec = self.replay.rec
+        self.seek.blockSignals(True)
+        self.seek.setRange(0, max(int(rec.end - rec.start), 1))
+        self.seek.setValue(0)
+        self.seek.blockSignals(False)
+        self.play_bar.setEnabled(True)
+        self.go_home()
+        self._update_play_bar()
+
+    def on_replay_failed(self, msg):
+        self.stop_replay()
+        QtWidgets.QMessageBox.critical(self, "ADS-B", msg)
+
+    def stop_replay(self, clear=True):
+        if not self.replay:
+            return
+        self.replay.stop()
+        self.replay.wait(5000)
+        self.replay = None
+        self.play_bar.hide()
+        for w in (self.run_btn, self.net_chk, self.net_src, self.rec_chk):
+            w.setEnabled(True)
+        if clear:
+            self.go_home()          # 受信地点を元に戻し、再生していた機体を消す
+            self.set_status("停止中", "idle")
+
+    def on_pause(self):
+        if self.replay and self.replay.ready:
+            self.replay.set_paused(not self.replay.paused)
+            self._update_play_bar()
+
+    def on_seek(self):
+        if self.replay and self.replay.ready:
+            self.replay.seek(self.replay.rec.start + self.seek.value())
+            self._show_seek_pos(self.seek.value())
+
+    def _show_seek_pos(self, value):
+        rec = self.replay.rec
+        self.pos_lbl.setText(f"{adsb_record.clock(rec.start + value)}　"
+                             f"{adsb_record.duration(value)} / {adsb_record.duration(rec.end - rec.start)}")
+
+    def _update_play_bar(self):
+        r = self.replay
+        if not r or not r.ready:
+            return
+        self.pause_btn.setText("▶ 再生" if r.paused else "⏸ 一時停止")
+        if not self.seek.isSliderDown():
+            self.seek.blockSignals(True)
+            self.seek.setValue(int(r.vt - r.rec.start))
+            self.seek.blockSignals(False)
+            self._show_seek_pos(r.vt - r.rec.start)
+
     # ---------- 表示更新 ----------
     def refresh(self):
         net_on = self.net_chk.isChecked()
-        if not self.worker and not net_on and not self.shown:
+        if not self.worker and not net_on and not self.replay and not self.shown:
             return      # 何も更新するものがない（停止後は最後の表示を残す）
         status = []
-        local = []
+        local, net = [], []
+        if self.replay:
+            if not self.replay.ready:
+                self.set_status(f"記録を読み込み中… {self.replay_name}（{self.replay.lines:,} 行）", "idle")
+                return
+            local, net = self.replay.snapshot()
+            with_pos = sum(a["lat"] is not None for a in local)
+            r = self.replay
+            state = ("再生終了（▶ で最初から）" if r.vt >= r.rec.end else "一時停止") if r.paused else f"再生中 ×{r.speed}"
+            status.append(f"{state}：{self.replay_name}"
+                          f"　｜ 自局の機体 {len(local)}（位置あり {with_pos}）　{r.rate()} メッセージ/秒"
+                          + (f"　｜ ネット {len(net)}機" if r.rec.nets else ""))
+            self._update_play_bar()
         if self.worker:
             local, total = self.worker.snapshot()
             now = time.monotonic()
@@ -535,9 +705,12 @@ class AdsbWindow(QtWidgets.QWidget):
                           f"　｜ 累計 {total}　処理落ち {self.worker.dropped}回")
         if net_on:
             status.append(self.net.status())
-        # ネットの表示をやめたときは、ネットの機体を消すために1回だけ更新する
-        self.shown = net_on
-        planes = merge(local, self.net.snapshot() if net_on else [])
+            net = self.net.snapshot()
+        if self.recorder:
+            status.append(self.recorder.status())
+        # ネットの表示・再生をやめたときは、その機体を消すために1回だけ更新する
+        self.shown = net_on or self.replay is not None
+        planes = merge(local, net)
 
         home = self.home
         for a in planes:
@@ -547,7 +720,7 @@ class AdsbWindow(QtWidgets.QWidget):
             self.set_status("　｜ ".join(status))
         n_local = sum(a["src"] == "local" and a["lat"] is not None for a in planes)
         n_net = sum(a["src"] == "net" for a in planes)
-        self.count.setText(f"{len(planes)} 機（位置：自局 {n_local}・ネット {n_net}）" if net_on else f"{len(planes)} 機")
+        self.count.setText(f"{len(planes)} 機（位置：自局 {n_local}・ネット {n_net}）" if net else f"{len(planes)} 機")
 
         self.js(f"update({json.dumps(planes)}, {json.dumps(self.selected)}, {json.dumps(self.trail.isChecked())})")
         self._fill_table(planes)
@@ -589,9 +762,12 @@ class AdsbWindow(QtWidgets.QWidget):
         # 閉じたら SDR を空け、ネットからの取得も止める
         self.stop()
         self.net_chk.setChecked(False)
+        self.stop_replay()
         super().closeEvent(ev)
 
     def shutdown(self):
         self.closed = True
         self.stop()
         self.net.stop()
+        self.stop_replay()
+        self.rec_chk.setChecked(False)
