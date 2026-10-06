@@ -7,6 +7,7 @@
 """
 import html
 import json
+import math
 import sys
 import threading
 
@@ -161,11 +162,40 @@ class NumItem(QtWidgets.QTableWidgetItem):
 
 
 class NumAxis(pg.AxisItem):
-    """目盛りを 1,880,000 のような3桁区切りで表示する軸（既定の 1.88e+06 の表記を避ける）"""
+    """目盛りを 1,880,000 のような3桁区切りで表示する軸（既定の 1.88e+06 の表記を避ける）
+
+    log10 に変換した値を描くときは logMode を True にすると、目盛りを元の値（10 の何乗か）で表示する
+    """
 
     def tickStrings(self, values, scale, spacing):
+        if self.logMode:
+            # 1・2・5 の位置だけ数字を付ける（間の目盛りまで書くと重なって読めない）
+            out = []
+            for v in values:
+                x = 10 ** v
+                lead = round(x / 10 ** math.floor(math.log10(x)), 6)
+                if lead not in (1, 2, 5):
+                    out.append("")
+                else:
+                    out.append(f"{x:,.0f}" if x >= 1 else f"{x:.3g}")
+            return out
         digits = max(0, min(3, -int(f"{spacing * scale:e}".split("e")[1])))
         return [f"{v * scale:,.{digits}f}" for v in values]
+
+
+def indicator_combo(key="pop"):
+    """指標を選ぶコンボボックス（分類の見出し付き。currentData() が指標のキー）"""
+    combo = QtWidgets.QComboBox()
+    combo.setMaxVisibleItems(30)
+    group = None
+    for ind in rd.INDICATORS:
+        if ind.group != group:
+            group = ind.group
+            combo.addItem(f"―― {group} ――")
+            combo.model().item(combo.count() - 1).setEnabled(False)
+        combo.addItem(f"  {ind.name}", ind.key)
+    combo.setCurrentIndex(combo.findData(key))
+    return combo
 
 
 class Loader(QtCore.QObject):
@@ -211,17 +241,7 @@ class RegionStatsWindow(QtWidgets.QWidget):
         self.loader.done.connect(self.on_loaded)
 
         # --- 操作 ---
-        self.indicator = QtWidgets.QComboBox()
-        self.indicator.setMaxVisibleItems(30)
-        group = None
-        for ind in rd.INDICATORS:
-            if ind.group != group:
-                group = ind.group
-                self.indicator.addItem(f"―― {group} ――")
-                item = self.indicator.model().item(self.indicator.count() - 1)
-                item.setEnabled(False)
-            self.indicator.addItem(f"  {ind.name}", ind.key)
-        self.indicator.setCurrentIndex(self.indicator.findData("pop"))
+        self.indicator = indicator_combo()
         self.year = QtWidgets.QComboBox()
         self.year.setMinimumWidth(90)
         self.pref = QtWidgets.QComboBox()
@@ -234,6 +254,9 @@ class RegionStatsWindow(QtWidgets.QWidget):
         self.search.setMaximumWidth(220)
         self.refresh_btn = QtWidgets.QPushButton("⟳ 取り直す")
         self.refresh_btn.setToolTip(f"統計値は {rd.CACHE_DAYS} 日間キャッシュします。最新のデータを今すぐ取り直します")
+        self.chart_btn = QtWidgets.QPushButton("📈 グラフで分析")
+        self.chart_btn.setToolTip("推移の比較・将来の推計、2つの指標の関係（散布図）をグラフで見ます")
+        self.chart_window = None
         self.home_btn = QtWidgets.QPushButton("⌂ 観測地点")
         self.home_btn.setToolTip("気象衛星ウィンドウの「観測地点」のある市区町村を選びます")
         self.state = QtWidgets.QLabel("")
@@ -251,6 +274,7 @@ class RegionStatsWindow(QtWidgets.QWidget):
         bar.addSpacing(8)
         bar.addWidget(self.search)
         bar.addStretch()
+        bar.addWidget(self.chart_btn)
         bar.addWidget(self.home_btn)
         bar.addWidget(self.refresh_btn)
 
@@ -395,6 +419,7 @@ class RegionStatsWindow(QtWidgets.QWidget):
         self.search.returnPressed.connect(self.on_search)
         self.refresh_btn.clicked.connect(lambda: self.load_indicator(refresh=True))
         self.home_btn.clicked.connect(self.go_home)
+        self.chart_btn.clicked.connect(self.open_charts)
         self.table.itemSelectionChanged.connect(self.on_table_select)
 
         self.set_status("市区町村の境界を読み込み中…", "busy")
@@ -604,7 +629,7 @@ class RegionStatsWindow(QtWidgets.QWidget):
         lines = []
         if have:
             vs = sorted(v for v, _ in have)
-            med = vs[len(vs) // 2] if len(vs) % 2 else (vs[len(vs) // 2 - 1] + vs[len(vs) // 2]) / 2
+            med = rd.median(vs)
             lines.append(f"{scope} {n:,} 市区町村　中央値 {self.fmt(med)}　"
                          f"最大 {self.fmt(vs[-1])}　最小 {self.fmt(vs[0])}")
         if missing:
@@ -660,10 +685,10 @@ class RegionStatsWindow(QtWidgets.QWidget):
         codes = self.target_codes()
         xs, med = [], []
         for y in self.years:
-            vs = sorted(self.series[y][c] for c in codes if c in self.series[y])
-            if vs:
+            m = rd.median(self.series[y][c] for c in codes if c in self.series[y])
+            if m is not None:
                 xs.append(int(y))
-                med.append(vs[len(vs) // 2] if len(vs) % 2 else (vs[len(vs) // 2 - 1] + vs[len(vs) // 2]) / 2)
+                med.append(m)
         self.median_curve.setData(xs, med)
         c = self.selected
         sx = [int(y) for y in self.years if c in self.series[y]] if c else []
@@ -724,6 +749,21 @@ class RegionStatsWindow(QtWidgets.QWidget):
         if self.pref.currentText() not in (ALL, pref):
             self.pref.setCurrentText(ALL)
         self.select(code)
+
+    def shutdown(self):
+        """アプリの終了時：グラフ分析ウィンドウも閉じる"""
+        if self.chart_window:
+            self.chart_window.close()
+        self.close()
+
+    def open_charts(self):
+        """グラフ分析ウィンドウ（表示中の指標・範囲・選んだ市区町村を引き継ぐ）"""
+        import region_charts
+        if self.chart_window is None:
+            self.chart_window = region_charts.RegionChartsWindow()
+        self.chart_window.show_with(self.indicator.currentData(), self.pref.currentText(), self.selected)
+        self.chart_window.show()
+        self.chart_window.raise_()
 
     def go_home(self):
         """観測地点を含む市区町村を選ぶ（境界の多角形で内外判定する）"""

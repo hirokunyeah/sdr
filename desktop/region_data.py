@@ -28,6 +28,7 @@ BOUNDARY_URL = ("https://raw.githubusercontent.com/smartnews-smri/japan-topograp
                 "data/municipality/topojson/s0010/N03-21_210101_designated_city.json")
 DASHBOARD_URL = "https://dashboard.e-stat.go.jp/api/1.0/Json/getData"
 DASHBOARD_FROM = 2000     # 取得する最初の年（API は1回 10万件まで。市区町村 × 年で収まる範囲）
+AREA_FROM = 1920          # 全国・都道府県の値を取得する最初の年
 SOUMU_URL = "https://www.soumu.go.jp/main_sosiki/jichi_zeisei/czaisei/czaisei_seido/xls/J51-{yy}-b.xlsx"
 SOUMU_YEARS = 6           # 所得は今年度から何年度さかのぼって探すか
 
@@ -48,6 +49,8 @@ class Indicator:
     digits: int = 0       # 表示する小数点以下の桁数
     diverging: bool = False   # 0 を中心に増減を色分けする（増減率など）
     note: str = ""
+    summable: bool = False    # 市区町村の値を足し合わせられる（人数・台数など。割合や平均は足せない）
+    official: str = ""        # 公式の将来推計がある場合、その指標コード（統計ダッシュボード）
 
 
 def dash(code):
@@ -58,7 +61,7 @@ POP = dash("0201010000000010000")        # 総人口
 HOUSEHOLDS = dash("0202000000000010000")  # 世帯数
 
 INDICATORS = [
-    Indicator("pop", "人口", "総人口", "人", POP),
+    Indicator("pop", "人口", "総人口", "人", POP, summable=True, official="0201130020000010000"),
     Indicator("density", "人口", "人口密度", "人/km²", ("ratio", POP, dash("0101010000000010010"), 100),
               note="総人口 ÷ 総面積"),
     Indicator("old", "人口", "65歳以上の割合", "%", dash("0201010010000020030"), 1),
@@ -70,7 +73,7 @@ INDICATORS = [
     Indicator("daytime", "人口", "昼夜間人口比率", "%", ("ratio", dash("0201060000000010000"), POP, 100), 1,
               note="昼間人口 ÷ 夜間人口（総人口）。100 を超えると通勤・通学で人が集まる地域"),
     Indicator("foreign", "人口", "外国人人口（人口10万人当たり）", "人", dash("0201100001000010008")),
-    Indicator("households", "世帯・住宅", "世帯数", "世帯", HOUSEHOLDS),
+    Indicator("households", "世帯・住宅", "世帯数", "世帯", HOUSEHOLDS, summable=True),
     Indicator("hh_size", "世帯・住宅", "1世帯当たり人員", "人", dash("0202030000000020010"), 2),
     Indicator("old_alone", "世帯・住宅", "65歳以上の単独世帯の割合", "%", dash("0202010401000020010"), 1),
     Indicator("own_house", "世帯・住宅", "持ち家比率", "%", dash("0801010102010020000"), 1,
@@ -80,17 +83,17 @@ INDICATORS = [
     Indicator("floor", "世帯・住宅", "1住宅当たり延べ面積", "m²", dash("0801010401000010000"), 1,
               note="住宅・土地統計調査（5年ごと）"),
     Indicator("kei", "自動車", "軽自動車等の台数", "台", dash("1001040200000010010"),
-              note="軽自動車税の課税台数（原付・二輪を含む）。普通乗用車の市区町村別の数は公開 API がありません"),
+              note="軽自動車税の課税台数（原付・二輪を含む）。普通乗用車の市区町村別の数は公開 API がありません", summable=True),
     Indicator("kei_hh", "自動車", "1世帯当たり軽自動車等の台数", "台",
               ("ratio", dash("1001040200000010010"), HOUSEHOLDS, 1), 2),
     Indicator("income_per", "所得・経済", "納税者1人当たり課税対象所得", "万円", ("income", "per"),
               note="課税対象所得 ÷ 所得割の納税義務者数（総務省「市町村税課税状況等の調」）。"
                    "年度は課税年度で、前年の所得が対象"),
-    Indicator("income_total", "所得・経済", "課税対象所得の総額", "億円", ("income", "total"), 1),
-    Indicator("taxpayers", "所得・経済", "所得割の納税義務者数", "人", ("income", "payers")),
+    Indicator("income_total", "所得・経済", "課税対象所得の総額", "億円", ("income", "total"), 1, summable=True),
+    Indicator("taxpayers", "所得・経済", "所得割の納税義務者数", "人", ("income", "payers"), summable=True),
     Indicator("unemp", "所得・経済", "完全失業率", "%", dash("0301100000020020010"), 1, note="国勢調査"),
     Indicator("offices", "所得・経済", "事業所数（民営）", "事業所", dash("0701010001000010012"),
-              note="経済センサス"),
+              note="経済センサス", summable=True),
 ]
 BY_KEY = {i.key: i for i in INDICATORS}
 
@@ -146,12 +149,16 @@ def regions(topo):
     return out
 
 
-def _dashboard(code):
-    """統計ダッシュボードの1指標 → {年: {市区町村コード: 値}}"""
+def _dashboard(code, rank=4):
+    """統計ダッシュボードの1指標 → {年: {地域コード: 値}}
+
+    rank 4：市区町村（コード5桁）、3：都道府県（"01000" など）
+    """
     # 期間の指定は、暦年の指標は "2000CY00"、年度の指標（比率など）は "2000FY00" の形で行う
     for cycle in ("CY", "FY"):
-        url = (f"{DASHBOARD_URL}?Lang=JP&IndicatorCode={code}&RegionalRank=4"
-               f"&TimeFrom={DASHBOARD_FROM}{cycle}00")
+        # 全国・都道府県は件数が少ないので古い年から取る（総人口は1920年から）
+        url = (f"{DASHBOARD_URL}?Lang=JP&IndicatorCode={code}&RegionalRank={rank}"
+               f"&TimeFrom={DASHBOARD_FROM if rank == 4 else AREA_FROM}{cycle}00")
         res = json.loads(_get(url))["GET_STATS"]
         if "STATISTICAL_DATA" in res:
             break
@@ -166,6 +173,8 @@ def _dashboard(code):
         try:
             value = float(v["$"])
         except (KeyError, ValueError):   # 秘匿・欠測は "-" や "***" になる
+            continue
+        if v.get("@cycle") not in ("3", "4"):   # 年・年度の値だけ使う（全国などには毎月の推計値も混ざる）
             continue
         out.setdefault(v["@time"][:4], {})[v["@regionCode"]] = value
     return out
@@ -232,14 +241,17 @@ def _income():
     return out
 
 
-def _raw(spec, refresh):
+def _raw(spec, refresh, rank=4):
     """取得元ごとの生データ（キャッシュ付き）"""
     kind = spec[0]
-    name = f"dash_{spec[1]}.json.gz" if kind == "dash" else "income.json.gz"
+    if kind == "dash":
+        name = f"dash_{spec[1]}.json.gz" if rank == 4 else f"dash_{spec[1]}_area{rank}.json.gz"
+    else:
+        name = "income.json.gz"
     data = None if refresh else _read_cache(name, CACHE_DAYS * 86400)
     if data is None:
         try:
-            data = _dashboard(spec[1]) if kind == "dash" else _income()
+            data = _dashboard(spec[1], rank) if kind == "dash" else _income()
         except Exception:
             data = _read_cache(name)      # 取得できなければ古いキャッシュでも使う
             if data is None:
@@ -249,13 +261,35 @@ def _raw(spec, refresh):
     return data
 
 
-def _series(spec, refresh):
+def _area_rows(rows):
+    """市区町村別の所得の行を都道府県（コード2桁）と全国（"00"）に足し合わせる"""
+    out = {}
+    for c, (payers, inc) in rows.items():
+        for k in (c[:2], "00"):
+            p, i = out.get(k, (0.0, 0.0))
+            out[k] = (p + payers, i + inc)
+    return out
+
+
+def _series(spec, refresh, area=False):
+    """指標の値。area なら全国（"00"）と都道府県（コード2桁）、そうでなければ市区町村（コード5桁）"""
     if spec[0] == "dash":
-        return _raw(spec, refresh)
+        if not area:
+            return _raw(spec, refresh)
+        # 全国（"00000"）と都道府県（"01000" など）を2桁のコードにそろえて1つにする
+        out = {}
+        for rank in (2, 3):
+            for year, vals in _raw(spec, refresh, rank).items():
+                acc = out.setdefault(year, {})
+                for c, v in vals.items():
+                    acc[c[:2]] = v
+        return out
     if spec[0] == "income":
         field = spec[1]
         out = {}
         for year, rows in _raw(spec, refresh).items():
+            if area:
+                rows = _area_rows(rows)
             if field == "per":
                 out[year] = {c: inc / payers / 10 for c, (payers, inc) in rows.items() if payers > 0}
             elif field == "total":
@@ -265,7 +299,7 @@ def _series(spec, refresh):
         return out
     # 比率：分子の各年に、その年以前で最も新しい分母の年を組み合わせる（調査の周期が違うため）
     _, num_spec, den_spec, scale = spec
-    num, den = _series(num_spec, refresh), _series(den_spec, refresh)
+    num, den = _series(num_spec, refresh, area), _series(den_spec, refresh, area)
     den_years = sorted(den)
     out = {}
     for year, values in num.items():
@@ -280,6 +314,38 @@ def _series(spec, refresh):
 def load(key, refresh=False):
     """指標の値 → {年: {市区町村コード: 値}}"""
     return _series(BY_KEY[key].spec, refresh)
+
+
+def load_area(key, refresh=False):
+    """全国・都道府県の値 → {年: {"00"（全国） または 都道府県コード2桁: 値}}
+
+    市区町村の値を足すのではなく、統計ダッシュボードの全国・都道府県別の値を使う
+    （市町村合併の前の年も正しく、全国の総人口は1920年からある）。所得は市区町村の値を足す（2021年度〜で合併なし）
+    """
+    return _series(BY_KEY[key].spec, refresh, area=True)
+
+
+def load_official(key, refresh=False):
+    """公式の将来推計 → {年: {コード: 値}}（全国 "00"・都道府県2桁・市区町村5桁がまざる）。ない指標は {}
+
+    総人口は国立社会保障・人口問題研究所の「日本の将来推計人口」「日本の地域別将来推計人口」（統計ダッシュボード経由）
+    """
+    code = BY_KEY[key].official
+    if not code:
+        return {}
+    spec = ("dash", code)
+    out = _series(spec, refresh, area=True)
+    for year, vals in _raw(spec, refresh, 4).items():
+        out.setdefault(year, {}).update(vals)
+    return out
+
+
+def median(values):
+    vs = sorted(values)
+    if not vs:
+        return None
+    n = len(vs)
+    return vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2
 
 
 # ---------------- 色分け ----------------

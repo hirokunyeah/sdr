@@ -1170,7 +1170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.sat_window:
             self.sat_window.shutdown()
         if self.region_window:
-            self.region_window.close()
+            self.region_window.shutdown()
         self.stop_recording()
         self.stop_worker()
         super().closeEvent(ev)
